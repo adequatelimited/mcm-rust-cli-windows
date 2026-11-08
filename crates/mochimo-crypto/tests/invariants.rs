@@ -445,6 +445,11 @@ fn crate_source_files() -> Vec<(String, String)> {
         if !src.is_dir() {
             continue;
         }
+        // File names are compared against string literals of the form
+        // `crates/mochimo-crypto/src/...`, so paths are built with `/` on
+        // every platform. On Windows `to_string_lossy` of a relative path
+        // joins with `\`, which would fail every comparison; on Unix the
+        // replacement changes nothing.
         let mut stack = vec![src];
         while let Some(d) = stack.pop() {
             let entries = std::fs::read_dir(&d)
@@ -460,7 +465,7 @@ fn crate_source_files() -> Vec<(String, String)> {
                         .strip_prefix(&root)
                         .unwrap_or(&p)
                         .to_string_lossy()
-                        .into_owned();
+                        .replace('\\', "/");
                     out.push((name, text));
                 }
             }
@@ -716,7 +721,7 @@ mod census {
             bin: "invariants",
             tier: Tier::Executed,
             evidence: "I3 atomicity:",
-            floor: 4, // temp write, fsync file, rename, fsync dir -- I3's own clause
+            floor: 4, // temp write, fsync file, rename, fsync dir -- I3's own clause; on Windows two steps over two commits
         },
         Row {
             guard: "startup_refuses_divergence_at_the_wallet_layer_not_at_the_keystore",
@@ -1266,6 +1271,87 @@ mod census {
         }
         Ok(block.to_owned())
     }
+
+    /// The gate `tests/cli.rs` compiles its pty harness behind, as the `cfg`
+    /// attribute's tokens with the spaces taken out.
+    const PTY_GATE: &str = "cfg(all(unix,not(miri)))";
+
+    /// What a guard reports in place of the census's evidence for `target`
+    /// when this platform does not build it; `None` when it does, and the
+    /// guard asks [`check`] as it would anywhere.
+    ///
+    /// Only the tests in `tests/cli.rs`'s `pty` module are not built
+    /// everywhere: their harness drives the shipped binary through
+    /// `script(1)` and is gated to Unix. On Windows libtest lists none of that
+    /// module and no test runs the binary's console, so the guard reports
+    /// that gap in place of evidence instead of failing on every Windows run.
+    ///
+    /// **The exemption checks its own premise and exempts only the
+    /// platform.** Where the gate does not hold, this parses `tests/cli.rs`
+    /// and panics unless the file still declares a `pty` module behind
+    /// exactly `PTY_GATE` and still defines the target in it as a `#[test]`.
+    /// A pty test deleted, renamed, stripped of its attribute or gated some
+    /// other way fails here as it fails under [`check`] on Unix: only its
+    /// absence from the run list is excused, and only where the gate removes
+    /// it. A gate widened to include Windows also fails here, because a
+    /// harness that runs there must be checked by the census.
+    pub fn not_built_here(target: &str) -> Option<String> {
+        use quote::ToTokens;
+        let name = target.strip_prefix("pty::")?;
+        // The same predicate as `PTY_GATE`, read at compile time: where it
+        // holds, the module is built and the census can ask.
+        if cfg!(all(unix, not(miri))) {
+            return None;
+        }
+        const PATH: &str = "crates/mochimo-crypto/tests/cli.rs";
+        let text = super::read_crate_file(PATH);
+        let ast = syn::parse_file(&text).unwrap_or_else(|e| panic!("syn could not parse {PATH}: {e}"));
+        let module = ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Mod(m) if m.ident == "pty" => Some(m),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{PATH} declares no `pty` module, so `{target}` is absent because the \
+                     harness is gone, not because this platform does not build it."
+                )
+            });
+        let gates: Vec<String> = module
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("cfg"))
+            .map(|a| a.meta.to_token_stream().to_string().replace(' ', ""))
+            .collect();
+        assert!(
+            gates == [PTY_GATE],
+            "{PATH}'s `pty` module is gated by {gates:?}, not by exactly `{PTY_GATE}`. \
+             Its absence here is excused under that gate and no other: a different \
+             gate is a different decision about where the harness runs, and it is \
+             made beside this function."
+        );
+        let defined = module.content.as_ref().is_some_and(|(_, items)| {
+            items.iter().any(|item| {
+                matches!(item, syn::Item::Fn(f)
+                    if f.sig.ident == name && f.attrs.iter().any(|a| a.path().is_ident("test")))
+            })
+        });
+        assert!(
+            defined,
+            "`{target}` is not a `#[test]` in {PATH}'s `pty` module. On Unix the census \
+             would find it missing from the run list; this platform does not build the \
+             module, so the check is made on the source, and it is missing there too."
+        );
+        Some(format!(
+            "`{target}` is not built on {}: {PATH} gates its pty harness behind \
+             `{PTY_GATE}`, and the gate and the test are both in place. What it \
+             establishes on Unix -- the shipped binary's prompts on a real terminal -- \
+             nothing that runs here establishes.",
+            std::env::consts::OS
+        ))
+    }
 }
 
 /// The census's population is libtest's run list.
@@ -1299,13 +1385,30 @@ fn execution_census_population_is_libtests_run_list() {
     // its module path; a parser that ignored the gate or the module would
     // spell it differently or list a test the gate removed.
     const MODULE_PATHED: &str = "pty::create_on_a_real_pty_shows_a_phrase_that_recovers_the_store";
-    assert!(
-        census::listed("cli").contains(MODULE_PATHED),
-        "`{MODULE_PATHED}` is not in the `cli` binary's run list under its \
-         module path. libtest prints a nested test as `module::name`; a \
-         census reading a parse of items rather than libtest's list would not \
-         spell it that way, and a `cfg`-removed module would not appear at all."
-    );
+    let listed = census::listed("cli").contains(MODULE_PATHED);
+    if let Some(gap) = census::not_built_here(MODULE_PATHED) {
+        // Where the gate removes the module, the witness is the same fact
+        // from the other side: the source holds the test -- the call above
+        // has just found it there, a `#[test]` behind the gate -- and libtest
+        // lists nothing of that name, where a population parsed from items
+        // would have counted it.
+        assert!(
+            !listed,
+            "`{MODULE_PATHED}` is in the census's `cli` population on a platform \
+             whose gate removes its module. libtest cannot list what was not \
+             compiled, so the population is not libtest's list: a parse of items \
+             would count it exactly like this.\n{gap}"
+        );
+        println!("  execution census witness: {gap}");
+    } else {
+        assert!(
+            listed,
+            "`{MODULE_PATHED}` is not in the `cli` binary's run list under its \
+             module path. libtest prints a nested test as `module::name`; a \
+             census reading a parse of items rather than libtest's list would not \
+             spell it that way, and a `cfg`-removed module would not appear at all."
+        );
+    }
 
     println!(
         "  execution census population: {total} tests across {} binaries \
@@ -1526,36 +1629,63 @@ fn key_signs_once_per_keystore_with_the_raw_signer_crate_private_not_absent() {
     );
 }
 
-/// Direct Unix APIs and platform gates are confined to five files.
+/// Direct platform APIs and platform gates are confined to a declared set of
+/// files.
 ///
-/// * `keystore/perms.rs`: Unix metadata, creation modes and the effective
-///   user ID used to check the opened directory's owner.
-/// * `keystore/directory.rs`: `rustix` directory-relative operations that keep
-///   every store access attached to the verified directory handle. The
-///   `rustix::` row covers both this module and the permission model.
-/// * `bin/tawara.rs`: the device paths and the `stty` subprocess. The library
-///   reaches neither: entropy is a parameter and prompts go through
-///   `cli::create::Terminal`.
-/// * `lib.rs` and `keystore/mod.rs`: the two `compile_error!` gates. `lib.rs`
-///   also matches `/dev/` because its gate's message names the device paths.
+/// The crate builds for Unix and for Windows and refuses every other target,
+/// in `lib.rs` and again in `keystore`. Each platform supplies the permission
+/// model, the device secrets are read from, the entropy source and the
+/// keystore's storage primitives. One needle per kind of site is matched over
+/// comment-stripped code:
 ///
-/// A port can find the direct platform dependencies here. It may also need to
-/// change code that relies on platform durability semantics behind standard
-/// library APIs; this check only keeps new direct Unix APIs inside the
-/// declared boundary.
+/// * `std::os::unix`: `keystore/perms.rs`, the Unix permission model.
+/// * `rustix::`: `keystore/directory.rs`, the retained directory handle and
+///   its directory-relative operations; and `keystore/perms.rs`, the modes
+///   and effective user ID used to check the opened directory's owner.
+/// * `std::os::windows` and `windows_sys`: `keystore/perms/windows.rs`, the
+///   Windows permission model and the slot files' opening and creation; and
+///   `bin/tawara.rs`, the console and the generator.
+/// * `/dev/` and `"stty"`: `bin/tawara.rs`. The library reaches neither:
+///   entropy is a parameter and prompts go through `cli::create::Terminal`.
+/// * `cfg(unix)` and `cfg(windows)`: the files holding a per-platform arm.
+///   `medium.rs` selects the Unix primitives over a retained directory or the
+///   Windows slot layout; their flushes use standard-library APIs with
+///   platform-specific durability semantics, which an API-name scan cannot
+///   distinguish, so the arm's attribute is matched instead.
+///   `keystore/mod.rs` holds the slot layout's reading and commit on Windows
+///   beside the Unix arm, and `error.rs` its Windows-only access-list
+///   variants and its Unix-only file-mode variant.
+///   `perms/windows.rs` is gated whole at its `mod` line in `perms.rs`, and
+///   `keystore/directory.rs` is gated whole in `keystore/mod.rs`; its direct
+///   calls are covered by the `rustix::` row. `keystore/slots.rs` is compiled
+///   on Windows and under test everywhere and names no platform.
+/// * `cfg(not(any(unix, windows)))`: `lib.rs` and `keystore/mod.rs`, the two
+///   gates that refuse every other target.
+///
+/// A port can find the direct platform dependencies and platform selections
+/// here. It may also need to change code that relies on platform durability
+/// semantics behind standard-library APIs. A file joining a row fails, and
+/// the failure message names the boundaries it should use instead.
 #[test]
 fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
     const PERMS: &str = "crates/mochimo-crypto/src/keystore/perms.rs";
     const DIRECTORY: &str = "crates/mochimo-crypto/src/keystore/directory.rs";
+    const PERMS_WINDOWS: &str = "crates/mochimo-crypto/src/keystore/perms/windows.rs";
+    const MEDIUM: &str = "crates/mochimo-crypto/src/keystore/medium.rs";
+    const ERROR: &str = "crates/mochimo-crypto/src/error.rs";
     const BIN: &str = "crates/mochimo-crypto/src/bin/tawara.rs";
     const LIB: &str = "crates/mochimo-crypto/src/lib.rs";
     const KEYSTORE: &str = "crates/mochimo-crypto/src/keystore/mod.rs";
-    const SURFACE: [(&str, &[&str]); 5] = [
+    const SURFACE: [(&str, &[&str]); 9] = [
         ("std::os::unix", &[PERMS]),
         ("rustix::", &[DIRECTORY, PERMS]),
-        ("/dev/", &[BIN, LIB]),
+        ("std::os::windows", &[PERMS_WINDOWS, BIN]),
+        ("windows_sys", &[PERMS_WINDOWS, BIN]),
+        ("/dev/", &[BIN]),
         ("\"stty\"", &[BIN]),
-        ("cfg(not(unix))", &[KEYSTORE, LIB]),
+        ("cfg(unix)", &[PERMS, MEDIUM, ERROR, KEYSTORE, BIN]),
+        ("cfg(windows)", &[PERMS, MEDIUM, ERROR, KEYSTORE, BIN]),
+        ("cfg(not(any(unix, windows)))", &[KEYSTORE, LIB]),
     ];
 
     let files = crate_sources();
@@ -1576,11 +1706,11 @@ fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
         want.sort_unstable();
         assert_eq!(
             found, want,
-            "the Unix surface moved: `{needle}` is named by a different set of files than this \
-             check enumerates.\n  found:    {found:?}\n  expected: {want:?}\nA new file here is \
-             another place a port has to find. Put permission checks in `keystore::perms`, \
-             directory operations in `keystore::directory`, or terminal and entropy code in \
-             the binary; otherwise add the file here with the reason it needs a separate boundary."
+            "the platform surface moved: `{needle}` is named by a different set of files than \
+             this check enumerates.\n  found:    {found:?}\n  expected: {want:?}\nA new file \
+             here is a new place a platform decision lives. Either put the site behind \
+             `keystore::perms`, `keystore::directory`, or the binary's terminal and entropy code, \
+             or add the file here with the reason it needs a separate boundary."
         );
     }
 }
@@ -2755,6 +2885,7 @@ fn spend_state_is_atomic_under_syscall_kill_not_power_loss() {
 /// fixed entropy and catch a target that moved before the rename. The state
 /// comparisons after a reopen (`view()`, `generation()`, `into_records()`)
 /// are what "fully pre or fully post" means, and hold for any nonce.
+#[cfg(unix)]
 #[test]
 fn spend_state_is_never_observed_half_advanced() {
     use keystore_harness::{
@@ -3027,6 +3158,247 @@ fn spend_state_is_never_observed_half_advanced() {
     );
 }
 
+/// I3's proof on Windows, where the store is two slot files rewritten in
+/// place and a commit is two steps (write, flush). Each commit of the
+/// reservation and the settle is stopped after each step, and its write is
+/// torn in every mix of old and new sectors, at the old length and at the
+/// new. After each, the store is reopened from disk and every member of the
+/// spend state must be fully pre or fully post: post once the write is
+/// whole, pre while it is torn.
+///
+/// A stop models a kill at a syscall boundary; on this layout a whole write
+/// is already the newer slot, so both stops are post. A tear models what a
+/// power cut can leave of an unflushed write: sector by sector, a mix of the
+/// old slot and the new frame. Not driven: a flushed write that is lost
+/// (the layout relies on the platform's documented flush guarantee), and a
+/// sector torn inside itself, which the keyless check refuses like any other
+/// mix and which `keystore::slots`' own tests cover with every one-bit
+/// change and every cut of a frame.
+///
+/// Each uninterrupted commit must be one write and one flush, of the same
+/// slot, at the frame's length.
+#[cfg(windows)]
+#[test]
+fn spend_state_is_never_observed_half_advanced() {
+    use keystore_harness::{derived_account, imported_account, ScratchDir, DERIVED_TAG, DIGEST, FIGURES, IMPORTED_TAG};
+    use mochimo_crypto::account::WotsIndex;
+    use mochimo_crypto::keystore::{Call, Disk, Instrumented, Keystore, Pending};
+
+    type Store = Keystore<Instrumented<Disk>>;
+    const STEPS: [&str; 2] = ["write_slot", "flush_slot"];
+    const SECTOR: usize = 512;
+    /// The retained block's digest, as in the Unix proof.
+    const SETTLED_DIGEST: [u8; 32] = [0xD0; 32];
+    let one = WotsIndex::ZERO.advanced().unwrap_or_else(|e| panic!("{e}"));
+    let retained = Pending {
+        spent_index: WotsIndex::ZERO,
+        digest: SETTLED_DIGEST,
+        figures: Some(FIGURES),
+    };
+    let open_block = Pending {
+        spent_index: one,
+        digest: DIGEST,
+        figures: Some(FIGURES),
+    };
+
+    // The Unix proof's two seeds: one reservation settled and retained, and
+    // the same store one commit further, the next reservation open.
+    fn seed(dir: &ScratchDir) -> Store {
+        let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init())
+            .unwrap_or_else(|e| panic!("create: {e}"));
+        ks.add(imported_account()).unwrap_or_else(|e| panic!("add imported: {e}"));
+        let mut d = derived_account();
+        for _ in 0..5 {
+            d.advance().unwrap_or_else(|e| panic!("advance: {e}"));
+        }
+        ks.add(d).unwrap_or_else(|e| panic!("add derived: {e}"));
+        let _ = ks
+            .persist_advance(&IMPORTED_TAG, &SETTLED_DIGEST, FIGURES)
+            .unwrap_or_else(|e| panic!("seed reserve: {e}"));
+        ks.persist_settled(&IMPORTED_TAG).unwrap_or_else(|e| panic!("seed settle: {e}"));
+        ks.medium_mut().reset_calls();
+        ks
+    }
+    fn seed_open(dir: &ScratchDir) -> Store {
+        let mut ks = seed(dir);
+        let _ = ks
+            .persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES)
+            .unwrap_or_else(|e| panic!("seed open: {e}"));
+        ks.medium_mut().reset_calls();
+        ks
+    }
+    fn reserve(ks: &mut Store) -> mochimo_crypto::Result<()> {
+        ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).map(|_| ())
+    }
+    fn settle(ks: &mut Store) -> mochimo_crypto::Result<()> {
+        ks.persist_settled(&IMPORTED_TAG)
+    }
+    /// `len` bytes, each sector from `new` where `mask` has its bit and from
+    /// `old` where it has not, and zero past the end of either.
+    fn mix(old: &[u8], new: &[u8], mask: u32, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|at| {
+                let source = if mask & (1 << (at / SECTOR)) != 0 { new } else { old };
+                source.get(at).copied().unwrap_or(0)
+            })
+            .collect()
+    }
+    fn reopen(label: &str, dir: &ScratchDir) -> Store {
+        keystore_harness::reopen_with(label, dir.path(), || Instrumented::new(Disk))
+            .result
+            .unwrap_or_else(|e| panic!("{label}: reopen: {e}"))
+    }
+
+    // What a fresh reader finds, checked to be wholly one side of the commit:
+    // `true` for post.
+    let reserved = |ks: &Store, pre_gen: u64, at: &str| -> bool {
+        let view = ks
+            .view(&IMPORTED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("{at}: imported account vanished"));
+        let gen = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+        let index_is_pre = view.wots_index == one;
+        let pending_is_pre = view.pending.is_none();
+        let settled_is_pre = view.settled.is_some();
+        let gen_is_pre = gen == pre_gen;
+        assert!(
+            index_is_pre == pending_is_pre && pending_is_pre == settled_is_pre && settled_is_pre == gen_is_pre,
+            "{at}: spend state observed HALF-advanced -- index pre={index_is_pre}, pending \
+             pre={pending_is_pre}, settled pre={settled_is_pre}, generation pre={gen_is_pre}"
+        );
+        if index_is_pre {
+            assert_eq!(view.settled, Some(retained), "{at}: the pre-spend state lost its retained block");
+        } else {
+            assert_eq!(view.pending, Some(open_block), "{at}: the reservation is not the one sealed");
+            assert_eq!(view.wots_index.get(), 2, "{at}: the index is not one past the reservation");
+            assert_eq!(view.settled, None, "{at}: the retained block survived the reservation that releases it");
+        }
+        let derived = ks
+            .view(&DERIVED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("{at}: derived account vanished"));
+        assert_eq!(derived.wots_index.get(), 5, "{at}: the sibling account moved");
+        !index_is_pre
+    };
+    let settled = |ks: &Store, pre_gen: u64, at: &str| -> bool {
+        let view = ks
+            .view(&IMPORTED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("{at}: imported account vanished"));
+        let gen = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+        let open_is_pre = view.pending.is_some();
+        let retained_is_post = view.settled.is_some();
+        let gen_is_pre = gen == pre_gen;
+        assert!(
+            open_is_pre != retained_is_post && open_is_pre == gen_is_pre,
+            "{at}: settle observed HALF-done -- open={open_is_pre}, retained={retained_is_post}, \
+             generation pre={gen_is_pre}"
+        );
+        if open_is_pre {
+            assert_eq!(view.pending, Some(open_block), "{at}: the open reservation is not the one sealed");
+        } else {
+            assert_eq!(view.settled, Some(open_block), "{at}: the settled block is not the reservation");
+        }
+        assert_eq!(view.wots_index.get(), 2, "{at}: settle moved the index");
+        !open_is_pre
+    };
+
+    let mut stops = 0usize;
+    let mut tears = 0usize;
+    type Seed = fn(&ScratchDir) -> Store;
+    type Commit = fn(&mut Store) -> mochimo_crypto::Result<()>;
+    type Observe<'a> = &'a dyn Fn(&Store, u64, &str) -> bool;
+    let walks: [(&str, Seed, Commit, Observe<'_>); 2] =
+        [("reservation", seed, reserve, &reserved), ("settle", seed_open, settle, &settled)];
+    for (label, seeded, commit, observe) in walks {
+        // Control: the uninterrupted commit, the slot it writes, and that
+        // slot's bytes before and after.
+        let control = ScratchDir::new("i3-slot-control");
+        let mut ks = seeded(&control);
+        let pre_gen = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+        let before = |name: &str| std::fs::read(control.path().join(name)).unwrap_or_else(|e| panic!("{e}"));
+        let (old0, old1) = (before("accounts.mks"), before("accounts.mks.1"));
+        commit(&mut ks).unwrap_or_else(|e| panic!("{label}: control commit: {e}"));
+        let calls = ks.medium().calls().to_vec();
+        let [Call::WriteSlot { path, len }, Call::FlushSlot { path: flushed }] = calls.as_slice() else {
+            panic!("{label}: the uninterrupted commit is not one write and one flush: {calls:?}")
+        };
+        assert_eq!(path, flushed, "{label}: the commit flushed a slot other than the one it wrote");
+        let name = path.file_name().unwrap_or_else(|| panic!("{label}: a slot path with no name")).to_os_string();
+        let new = std::fs::read(path).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(*len, new.len(), "{label}: the write's recorded length is not the frame's");
+        let old = if name == "accounts.mks" { old0 } else { old1 };
+        assert_ne!(old, new, "{label}: the control commit changed nothing in the slot it wrote");
+        assert!(observe(&ks, pre_gen, &format!("{label} control")), "{label}: the control commit is not post");
+        drop(ks);
+
+        for k in 1..=STEPS.len() {
+            let dir = ScratchDir::new("i3-slot-stop");
+            let mut ks = seeded(&dir);
+            ks.medium_mut().stop_after(Some(k));
+            let err = commit(&mut ks).err().unwrap_or_else(|| panic!("{label} stop {k}: the commit returned Ok"));
+            assert_eq!(
+                err,
+                mochimo_crypto::Error::Io {
+                    op: STEPS[k - 1],
+                    kind: std::io::ErrorKind::Interrupted
+                },
+                "{label} stop {k}: not the injected error"
+            );
+            assert_eq!(ks.medium().calls().len(), k, "{label} stop {k}: the error path made a further medium call");
+            assert!(
+                matches!(commit(&mut ks), Err(mochimo_crypto::Error::Poisoned { .. })),
+                "{label} stop {k}: the handle is not poisoned"
+            );
+            drop(ks);
+            let ks = reopen("I3 slot stop", &dir);
+            assert!(observe(&ks, pre_gen, &format!("{label} stop {k}")), "{label} stop {k}: a whole write was not taken");
+            stops += 1;
+        }
+
+        let sectors = old.len().max(new.len()).div_ceil(SECTOR);
+        for mask in 0u32..(1 << sectors) {
+            for len in [old.len(), new.len()] {
+                let at = format!("{label} sectors {mask:#b} at the {} length", if len == new.len() { "new" } else { "old" });
+                let dir = ScratchDir::new("i3-slot-tear");
+                let mut ks = seeded(&dir);
+                assert_eq!(std::fs::read(dir.path().join(&name)).unwrap_or_else(|e| panic!("{e}")), old, "{at}: seeding is not deterministic");
+                ks.medium_mut().tear_after(
+                    Some(1),
+                    Box::new(move |stood: Option<&[u8]>, frame: &[u8]| -> Option<Vec<u8>> {
+                        Some(mix(stood.unwrap_or(&[]), frame, mask, len))
+                    }),
+                );
+                let err = commit(&mut ks).err().unwrap_or_else(|| panic!("{at}: the commit returned Ok"));
+                assert_eq!(
+                    err,
+                    mochimo_crypto::Error::Io {
+                        op: "write_slot",
+                        kind: std::io::ErrorKind::Interrupted
+                    },
+                    "{at}: not the injected error"
+                );
+                drop(ks);
+                let whole = mix(&old, &new, mask, len) == new;
+                let ks = reopen("I3 slot tear", &dir);
+                assert_eq!(observe(&ks, pre_gen, &at), whole, "{at}: taken as the wrong side of the commit");
+                tears += 1;
+            }
+        }
+    }
+    assert_eq!(stops, 4, "the walks drove {stops} stops, not two over each of two commits");
+    assert!(tears >= 8, "the walks drove {tears} torn writes, too few to mix");
+
+    // Every integer on this line is a small count; the largest is what the
+    // census reads against its floor of 4.
+    let driven = stops + tears;
+    println!(
+        "  I3 atomicity: {driven} interruption point(s) driven -- {stops} stop(s) after the slot \
+         layout's two steps over the reservation and the settle, {tears} write(s) torn by sector \
+         -- 4 member(s) observed across each, 2 account(s) reopened at every point"
+    );
+}
+
 /// I2's proof: the receipt that `Keystore::sign_spend` consumes is never
 /// released for an index that is not durable.
 ///
@@ -3039,6 +3411,7 @@ fn spend_state_is_never_observed_half_advanced() {
 /// for a broadcast takes `&AdvanceReceipt`, and nothing outside the crate
 /// can mint one (`ui/fail/account_advance_receipt_is_not_constructible.rs`).
 /// Same crash model and limits as the I3 proof above.
+#[cfg(unix)]
 #[test]
 fn signature_is_not_released_before_the_index_is_durable() {
     use keystore_harness::{derived_account, imported_account, ScratchDir, DIGEST, FIGURES, IMPORTED_TAG};
@@ -3121,6 +3494,116 @@ fn signature_is_not_released_before_the_index_is_durable() {
     let _ = broadcast(&r);
     drop(ks);
     let ks = keystore_harness::reopen("I2 control", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let v = ks.view(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("vanished"));
+    assert_eq!(v.wots_index, r.index());
+
+    println!(
+        "  I2 durability: {driven} crash point(s) driven between the first write and the \
+         receipt return, {receipts_escaped} receipt(s) escaped, 1 receipt from the \
+         uninterrupted run naming the index a fresh reopen reads"
+    );
+}
+
+/// I2's proof on Windows: the receipt is never released for an index that
+/// is not durable. The commit is stopped after each of the slot layout's two
+/// steps, and its write is torn sector by sector into a mix of the old slot
+/// and the new frame, as a power cut can leave an unflushed write.
+///
+/// A stop leaves the write whole, and on this layout a whole write is
+/// already the newer slot: the index is advanced, the previous one is not
+/// reachable again, and no receipt named it. A torn write leaves the store
+/// unchanged, and the account can still advance from there. As in I3's
+/// proof above, a lost flushed write is not driven.
+#[cfg(windows)]
+#[test]
+fn signature_is_not_released_before_the_index_is_durable() {
+    use keystore_harness::{derived_account, imported_account, ScratchDir, DIGEST, FIGURES, IMPORTED_TAG};
+    use mochimo_crypto::account::{AdvanceReceipt, WotsIndex};
+    use mochimo_crypto::keystore::{Disk, Instrumented, Keystore};
+
+    fn broadcast(_r: &AdvanceReceipt) -> &'static str {
+        "broadcast requires the receipt; it cannot precede persistence"
+    }
+
+    fn seed(dir: &ScratchDir) -> Keystore<Instrumented<Disk>> {
+        let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init())
+            .unwrap_or_else(|e| panic!("create: {e}"));
+        ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+        ks.add(derived_account()).unwrap_or_else(|e| panic!("{e}"));
+        ks.medium_mut().reset_calls();
+        ks
+    }
+
+    let mut receipts_escaped = 0usize;
+    let mut driven = 0usize;
+    // Two stops, then two tears: the first sector new and the rest as it
+    // stood, and the other way round.
+    for point in 0..4usize {
+        let dir = ScratchDir::new("i2-slot-crash");
+        let mut ks = seed(&dir);
+        let whole = point < 2;
+        if whole {
+            ks.medium_mut().stop_after(Some(point + 1));
+        } else {
+            let first_new = point == 2;
+            ks.medium_mut().tear_after(
+                Some(1),
+                Box::new(move |stood: Option<&[u8]>, frame: &[u8]| -> Option<Vec<u8>> {
+                    let stood = stood.unwrap_or(&[]);
+                    Some(
+                        (0..frame.len())
+                            .map(|at| {
+                                let source = if (at < 512) == first_new { frame } else { stood };
+                                source.get(at).copied().unwrap_or(0)
+                            })
+                            .collect(),
+                    )
+                }),
+            );
+        }
+        if ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).is_ok() {
+            receipts_escaped += 1;
+        }
+        drop(ks);
+        let mut ks = keystore_harness::reopen_with("I2 slot crash point", dir.path(), || Instrumented::new(Disk))
+            .result
+            .unwrap_or_else(|e| panic!("crash point {point}: reopen: {e}"));
+        let view = ks
+            .view(&IMPORTED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("crash point {point}: account vanished"));
+        if whole {
+            assert_eq!(view.wots_index.get(), 1, "crash point {point}: a whole write was not taken");
+            ks.persist_settled(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}"));
+            let back = ks.persist_advance_to(&IMPORTED_TAG, WotsIndex::ZERO).err();
+            assert!(
+                matches!(back, Some(mochimo_crypto::Error::Range { what: "wots index for tag", min: 2, got: 0, .. })),
+                "crash point {point}: the previous index was reachable again: {back:?}"
+            );
+        } else {
+            assert_eq!(view.wots_index.get(), 0, "crash point {point}: a torn write advanced the index");
+            let next = WotsIndex::ZERO.advanced().unwrap_or_else(|e| panic!("{e}"));
+            let r = ks
+                .persist_advance_to(&IMPORTED_TAG, next)
+                .unwrap_or_else(|e| panic!("crash point {point}: liveness after a torn write: {e}"));
+            assert_eq!(r.index(), next);
+            let _ = broadcast(&r);
+        }
+        driven += 1;
+    }
+    assert_eq!(driven, 4);
+    assert_eq!(receipts_escaped, 0, "a receipt escaped an interrupted persist");
+
+    // Control: the uninterrupted run releases exactly one receipt, and it
+    // names what a fresh reopen reads.
+    let dir = ScratchDir::new("i2-slot-control");
+    let mut ks = seed(&dir);
+    let r = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).unwrap_or_else(|e| panic!("{e}"));
+    let _ = broadcast(&r);
+    drop(ks);
+    let ks = keystore_harness::reopen("I2 slot control", dir.path())
         .result
         .unwrap_or_else(|e| panic!("{e}"));
     let v = ks.view(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("vanished"));
@@ -3320,7 +3803,9 @@ fn startup_refuses_divergence_at_the_wallet_layer_not_at_the_keystore() {
     // The acknowledged path, through the shipped binary: the operator can
     // take the path the report names.
     const PTY: &str = "pty::reconcile_on_a_real_pty_takes_the_acknowledged_path_the_report_names";
-    if let Err(why) = census::check(
+    if let Some(gap) = census::not_built_here(PTY) {
+        println!("  acknowledged path: {gap}");
+    } else if let Err(why) = census::check(
         "startup_refuses_divergence_at_the_wallet_layer_not_at_the_keystore",
         PTY,
     ) {
@@ -4961,7 +5446,7 @@ fn all_crate_rust_sources_raw() -> Vec<(String, String)> {
                     .strip_prefix(&root)
                     .unwrap_or(&p)
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 out.push((name, text));
             }
         }
@@ -5112,6 +5597,11 @@ const DECLARED_UNRESOLVED_SRC_NAMES: &[(&str, &str)] = &[
         "a `ureq` config builder method. Dependency surface.",
     ),
     (
+        "medium_slot_steps_are_not_reorderable",
+        "a trybuild compile-fail case, as above: Windows' order pin, registered there in the \
+         rename layout's place.",
+    ),
+    (
         "medium_steps_are_not_reorderable",
         "a trybuild compile-fail case, as above.",
     ),
@@ -5120,6 +5610,14 @@ const DECLARED_UNRESOLVED_SRC_NAMES: &[(&str, &str)] = &[
         "a rustc lint name, in `mochimo-crypto`'s crate-level `deny`. As above -- and this one \
          is load-bearing: it is what makes every `unsafe` block inside an `unsafe fn` state its \
          own SAFETY.",
+    ),
+    (
+        "from_raw_os_error",
+        "a `std::io::Error` constructor, called in `keystore/perms/windows.rs` to carry the \
+         status `GetNamedSecurityInfoW` returns, which is an error code and not a flag in \
+         `GetLastError`. Dependency surface: nothing in this tree defines it. A rename in `std` \
+         is a compile error -- but only in a Windows build, since the file compiles nowhere \
+         else, so on a Unix host this row is the one thing that notices the name at all.",
     ),
 ];
 
@@ -7604,6 +8102,39 @@ const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
          returned from `encode`.",
     ),
     (
+        "crates/mochimo-crypto/src/keystore/slots.rs",
+        "panic!",
+        11,
+        "inside the #[cfg(test)] module: `unwrap_or_else(|e| panic!(..))` on the \
+         steps that must succeed around what is under test -- sealing an image, \
+         deriving its key, framing, sorting and taking -- and the arm of each of \
+         two matches that names a sort that is neither an image nor torn. The \
+         module's non-test code contains no panicking construct: its reads are \
+         `get` and `split_at` on lengths already checked, its six constant \
+         indexes are into a slice of exactly that many bytes and argue it where \
+         they stand, and every failure is a Result.",
+    ),
+    (
+        "crates/mochimo-crypto/src/keystore/slots.rs",
+        "assert!",
+        12,
+        "same #[cfg(test)] module: the image back out of its frame, the vacant \
+         and absent sorts, every cut and every one-bit change of a frame sorting \
+         as torn, and one longer than any this build writes, the sector-mix \
+         walk's floor and its two verdicts, the refused later frame version, and \
+         the key `take` hands back.",
+    ),
+    (
+        "crates/mochimo-crypto/src/keystore/slots.rs",
+        "assert_eq!",
+        13,
+        "same #[cfg(test)] module: the forty-six-byte overhead its doc states, \
+         two frame lengths, three walk counts, each of the forty-nine pairs in \
+         the table of slot states against what `take` must make of it, the \
+         version, salt and parameters `take` hands back, and the wrong-password \
+         and two-salt refusals.",
+    ),
+    (
         "crates/mochimo-crypto/src/derive.rs",
         "assert!",
         8,
@@ -7854,18 +8385,92 @@ fn panicking_constructs_are_declared_at_their_sites() {
 /// No `unsafe` anywhere under `src/`, in particular not in
 /// `backend/native.rs`.
 ///
-/// The allow-list is empty, so any `unsafe` keyword under `src/` fails naming
-/// the file. A file floor keeps an empty walk from passing. An `unsafe` block
-/// in `native.rs` would change what "native is clean under Miri" means
-/// rather than widen what Miri checks; the failure message says so.
+/// The allow-list holds only the Windows boundary: files compiled only on
+/// Windows, each argued at its row. Any `unsafe` keyword elsewhere under
+/// `src/` fails naming the file. A file floor keeps an empty walk from
+/// passing, and the positive control is the fault-injection row that puts
+/// one `unsafe {}` back. An `unsafe` block in `native.rs` would change what
+/// "native is clean under Miri" means rather than widen what Miri checks;
+/// the failure message says so.
 ///
 /// Token walk, not text search, so `unsafe` in a SAFETY comment or doc string
 /// does not count.
 #[test]
 fn unsafe_is_confined_to_declared_files() {
-    // Empty. A row added here must state which boundary needs `unsafe` and
-    // why Miri cannot walk it.
-    const ALLOWED: [(&str, &str); 0] = [];
+    // A row added here must state which boundary needs `unsafe` and why Miri
+    // cannot walk it.
+    //
+    // Row 1, the Windows permission model: the boundary is Win32's security
+    // API, which `std` does not wrap. `std` neither reads a security
+    // descriptor nor creates a file under one, so the access-list check and
+    // the owner-only creation need foreign calls. Miri interprets Rust and
+    // stops at a foreign call, and no Miri run reaches the file: it is not
+    // compiled on Unix, and on Windows every test that would reach it does
+    // file I/O, which Miri's isolation refuses and which those tests are
+    // `not(miri)` for. The file's own header states how its tests establish
+    // it on a Windows runner and what they do not reach.
+    //
+    // Row 2, the binary's Windows console, on the same grounds. `std` offers
+    // no console mode, so echo cannot be turned off without `SetConsoleMode`;
+    // it reads a console only through its global stdin, whose buffer lives as
+    // long as the process and cannot be zeroized; and it has no interface to
+    // the system generator. The `unsafe` sits in one `cfg(windows)` module at
+    // the end of the file. The third field names that module, and the walk
+    // below requires every `unsafe` in the file to fall inside its braces and
+    // the module to be `cfg(windows)`, so the Unix arm cannot use `unsafe`
+    // under this row.
+    const ALLOWED: [(&str, &str, Option<&str>); 2] = [
+        (
+            "crates/mochimo-crypto/src/keystore/perms/windows.rs",
+            "the Windows permission model's Win32 security calls",
+            None,
+        ),
+        (
+            "crates/mochimo-crypto/src/bin/tawara.rs",
+            "the binary's Windows console and generator, in its `console` module",
+            Some("console"),
+        ),
+    ];
+
+    /// `Ok` when every line in `lines` falls inside the top-level module
+    /// `module` of `text` and that module is `cfg(windows)`; otherwise the
+    /// failure sentence. Lines come from the lexer and the module's bounds
+    /// from its braces as `syn` reads the same text, so both count lines the
+    /// same way.
+    fn confined_to_module(text: &str, module: &str, lines: &[usize]) -> Result<(), String> {
+        use quote::ToTokens;
+        let ast = syn::parse_file(text)
+            .map_err(|e| format!("does not parse ({e}), so the module its row names cannot be found"))?;
+        let m = ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Mod(m) if m.ident == module => Some(m),
+                _ => None,
+            })
+            .ok_or_else(|| format!("declares no top-level `mod {module}`, the module its row confines `unsafe` to"))?;
+        let windows_only = m.attrs.iter().any(|a| {
+            a.path().is_ident("cfg") && a.meta.to_token_stream().to_string().replace(' ', "") == "cfg(windows)"
+        });
+        if !windows_only {
+            return Err(format!(
+                "declares `mod {module}` without `#[cfg(windows)]`, and its row is argued as the Windows boundary"
+            ));
+        }
+        let Some((brace, _)) = &m.content else {
+            return Err(format!("declares `mod {module}` with no body in this file, so its lines cannot be read"));
+        };
+        let (open, close) = (brace.span.open().start().line, brace.span.close().end().line);
+        let outside: Vec<usize> = lines.iter().copied().filter(|l| *l < open || *l > close).collect();
+        if outside.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "contains `unsafe` at line(s) {outside:?}, outside `mod {module}` (lines {open} to {close}), \
+                 the one module its row allows it in"
+            ))
+        }
+    }
 
     fn count_unsafe(stream: proc_macro2::TokenStream, lines: &mut Vec<usize>) {
         for tree in stream {
@@ -7896,8 +8501,15 @@ fn unsafe_is_confined_to_declared_files() {
         count_unsafe(stream, &mut lines);
         files += 1;
 
-        match ALLOWED.iter().find(|(f, _)| *f == name) {
-            Some(_) => per_allowed.push((name, lines.len())),
+        match ALLOWED.iter().find(|(f, _, _)| *f == name) {
+            Some((_, _, scope)) => {
+                if let Some(module) = scope {
+                    if let Err(why) = confined_to_module(&text, module, &lines) {
+                        problems.push(format!("\x20 - {name} {why}."));
+                    }
+                }
+                per_allowed.push((name, lines.len()));
+            }
             None if lines.is_empty() => {}
             None => {
                 let miri_note = if name.ends_with("backend/native.rs") {
@@ -7921,7 +8533,7 @@ fn unsafe_is_confined_to_declared_files() {
 
     // The other direction: an allow-listed file with zero occurrences is a
     // stale permission.
-    for (file, why) in ALLOWED {
+    for (file, why, _) in ALLOWED {
         match per_allowed.iter().find(|(f, _)| f == file) {
             None => problems.push(format!(
                 "\x20 - allow-listed file {file} was not walked at all; the \
@@ -8351,7 +8963,7 @@ fn test_source_files() -> Vec<(String, String)> {
                     .strip_prefix(&root)
                     .unwrap_or(&p)
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 out.push((name, text));
             }
         }
@@ -8434,7 +9046,7 @@ fn code_only_understands_every_construct_its_inputs_contain() {
                     stack.push(p);
                 }
             } else if p.extension().is_some_and(|x| x == "rs") {
-                let rel = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().into_owned();
+                let rel = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
                 inputs.push((rel, std::fs::read_to_string(&p).unwrap_or_default()));
                 crate_src += 1;
             }
@@ -9146,15 +9758,18 @@ fn the_cli_cannot_reach_around_the_wallet() {
             // on the screen, and finds the phrase in neither redirected
             // stream. The census demand below requires it to have run.
             const PTY: &str = "pty::create_on_a_real_pty_shows_a_phrase_that_recovers_the_store";
-            if let Err(why) = census::check("the_cli_cannot_reach_around_the_wallet", PTY) {
+            if let Some(gap) = census::not_built_here(PTY) {
+                println!("  tty display: {gap}");
+            } else if let Err(why) = census::check("the_cli_cannot_reach_around_the_wallet", PTY) {
                 panic!(
                     "{path}: the print ban over `impl Terminal for Tty` is a text property and \
                      the thing that establishes the impl actually shows the operator anything \
                      is the pty harness -- which is not running: {PTY} must be in tests/cli.rs, \
                      run, pass and print `tty create:` with at least 6.\n{why}"
                 );
+            } else {
+                println!("  tty display: {PTY} censused, the shipped binary answered its prompts on a pty");
             }
-            println!("  tty display: {PTY} censused, the shipped binary answered its prompts on a pty");
 
             // The domain is the file, not one impl: the four print macros may
             // occur only inside `fn main`, which prints the report and the
@@ -9223,15 +9838,18 @@ fn the_cli_cannot_reach_around_the_wallet() {
             // here because a scan is only a text property.
             const PTY_PASSWORD: &str =
                 "pty::address_on_a_real_pty_needs_no_node_and_its_prompt_survives_a_redirected_stderr";
-            if let Err(why) = census::check("the_cli_cannot_reach_around_the_wallet", PTY_PASSWORD) {
+            if let Some(gap) = census::not_built_here(PTY_PASSWORD) {
+                println!("  tty password: {gap}");
+            } else if let Err(why) = census::check("the_cli_cannot_reach_around_the_wallet", PTY_PASSWORD) {
                 panic!(
                     "{path}: the main-only print ban is a text property and the thing that \
                      establishes the shared password prompt reaches the terminal is the pty \
                      harness -- which is not running: {PTY_PASSWORD} must be in tests/cli.rs, \
                      run, pass and print `tty password:` with at least 4.\n{why}"
                 );
+            } else {
+                println!("  tty password: {PTY_PASSWORD} censused, the shared prompt reached a pty with stderr redirected");
             }
-            println!("  tty password: {PTY_PASSWORD} censused, the shared prompt reached a pty with stderr redirected");
         }
         if PRE_GATE.iter().any(|m| path.ends_with(m)) {
             pre_gate_seen += 1;
@@ -9431,7 +10049,7 @@ fn ui_and_example_source_files() -> Vec<(String, String)> {
                     .strip_prefix(&root)
                     .unwrap_or(&p)
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 out.push((name, text));
             }
         }

@@ -24,6 +24,36 @@
 //! plus `bitflags`). Their `unsafe` code is system-call wrappers and kernel
 //! type definitions. They receive only the store path the operator named, the
 //! store's fixed file names, and descriptors this crate opened.
+//!
+//! On Windows `rustix` is not compiled; the keystore's permission model uses
+//! `windows-sys` and `windows-link` instead. The `unsafe` code in those
+//! crates is generated structure defaults and function-pointer declarations.
+//! The calls into the Windows API are made in this crate, in
+//! `keystore/perms/windows.rs`, one of the files
+//! `tests/invariants.rs::unsafe_is_confined_to_declared_files` permits to
+//! contain `unsafe`. They receive only the store path the operator named, the
+//! store's fixed file names, and buffers and handles this crate allocated or
+//! the system returned.
+//!
+//! # Platforms
+//!
+//! This crate targets Unix and Windows. Three interfaces have no portable
+//! implementation, so each platform supplies its own, and a build for any
+//! other target fails at compile time:
+//!
+//! | interface | Unix | Windows |
+//! | --- | --- | --- |
+//! | the keystore's permission model, a check against other local users | the store is created `0600` and its directory `0700`; a directory that is group- or world-writable, owned by another user or named by a symbolic link is refused, as is a store file owned by another user or readable or writable by group or others | the store is created with a protected access list granting only the current user; a directory writable by anyone other than this user, `SYSTEM` or the Administrators group, or named by a symbolic link or junction, is refused, as is a store file readable or writable by anyone else |
+//! | where the password and the recovery phrase are read, so that neither can be piped or redirected | `/dev/tty`, by path, with echo turned off by `stty` | the console buffers `CONIN$` and `CONOUT$`, by name, with echo turned off in the console mode |
+//! | entropy | `/dev/urandom` | `BCryptGenRandom`, the system-preferred generator |
+//!
+//! The first row is `keystore::perms`; the other two are in the binary,
+//! since the library takes entropy as a parameter and prompts through
+//! `cli::create::Terminal`. `keystore` states the storage guarantees it
+//! relies on for each platform. The test suite covers the Unix interfaces and
+//! the Windows permission model; the Windows console and entropy paths have
+//! no automated test. The BSDs provide the three Unix interfaces and are
+//! untested.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -43,21 +73,17 @@ compile_error!(
      cannot compute anything."
 );
 
-// Platform check. `keystore` has its own for the storage guarantees it
-// relies on.
-#[cfg(not(unix))]
+// Platform check: every target other than Unix and Windows fails here.
+// `keystore` has its own check for the storage guarantees it relies on.
+#[cfg(not(any(unix, windows)))]
 compile_error!(
-    "mochimo-crypto targets Unix, and is built and tested on Linux and macOS. \
-     Windows is not a goal. Three interfaces it needs have no portable \
-     stand-in here: the keystore's permission model is Unix mode bits and \
-     owners -- the store is created 0600 and its directory 0700, and a store \
-     whose directory is group- or world-writable, owned by another user or \
-     named by a symbolic link is refused, as is a store file owned by another \
-     user or readable or writable by group or others, which is a check \
-     against another local user rather than a convenience; the password and \
-     the recovery phrase are read from /dev/tty by path, so that neither can \
-     be piped or redirected; and entropy is read from /dev/urandom. The BSDs \
-     have all three and are untested."
+    "mochimo-crypto targets Unix and Windows. Three interfaces it needs have no \
+     portable stand-in, and each of those platforms supplies its own: the \
+     keystore's permission model (Unix mode bits and owners; Windows access \
+     lists), the device the password and recovery phrase are read from so that \
+     neither can be piped or redirected (the controlling terminal; the \
+     console), and the entropy source (the kernel's generator; \
+     BCryptGenRandom). This target is neither, and has none of the three here."
 );
 
 /// The raw primitives. Public only under the `raw-backend` feature, which the

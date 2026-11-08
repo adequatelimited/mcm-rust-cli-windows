@@ -9,7 +9,9 @@
 //! One directory holds one snapshot file with every account. Each commit
 //! rewrites it atomically in four steps: write a temp file, fsync it, rename it
 //! over the target, fsync the directory. A receipt is minted only after the
-//! fourth. The format is in `format` and the steps in `medium`. A single
+//! fourth. On Windows the snapshot is instead two slot files written in place;
+//! `slots` defines their frame and the rule by which `open` takes the newer
+//! image. The format is in `format` and the steps in `medium`. A single
 //! snapshot puts every member of a commit in one write (I3), at a cost of
 //! O(n) bytes per spend, dominated at wallet scale by the fsyncs.
 //!
@@ -47,31 +49,50 @@
 //! responsibility, and whether a returned flush is durable is up to the
 //! filesystem, as with every `fsync` here.
 //!
+//! On Windows, [`Medium::fsync_parent`] flushes nothing: Win32 documents no
+//! flush an unprivileged process can make that commits a directory's entry in
+//! its parent (`medium` cites the pages). A power cut before the file system
+//! commits the store directory's creation can therefore still lose the whole
+//! store. The call stays in `create` on both platforms so the order is the
+//! same (checked by
+//! `tests/keystore.rs::medium_sequence_is_exactly_the_slot_steps_with_their_arguments`).
+//!
 //! # The lock
 //!
 //! `keystore.lock` is created once, never unlinked, and held with
-//! `File::try_lock` (`flock(2)`) for the handle's life. The kernel releases it
-//! on process death, including `SIGKILL`, so a held lock always means a live
-//! holder and there is no stale-lock state. Unlinking it would allow two
-//! holders on different inodes. Two opens in one process also conflict
-//! (`flock` is per open file description). Local filesystems only: NFS lock
-//! emulation may not honour it.
+//! `File::try_lock` (`flock(2)`; `LockFileEx` on Windows) for the handle's
+//! life. The kernel releases it on process death, including `SIGKILL`, so a
+//! held lock always means a live holder and there is no stale-lock state.
+//! Unlinking it would allow two holders on different inodes. Two opens in one
+//! process also conflict (`flock` is per open file description). Local
+//! filesystems only: NFS lock emulation may not honour it.
+//!
+//! On Windows the lock is `LockFileEx`, exclusive and failing immediately,
+//! over the whole file. Windows enforces it against other handles: while the
+//! store is open, another handle's read of `keystore.lock` fails with
+//! `ERROR_LOCK_VIOLATION` (33); nothing in the library reads the file's
+//! contents. The system releases a terminated process's locks after a time
+//! that "depends upon available system resources" (Microsoft's
+//! documentation), so `Locked` can briefly be reported for a process that has
+//! already exited; a retry succeeds. Whether an SMB share honours the lock
+//! between machines is not established.
 //!
 //! The lock file's existence means nothing. A refused `open` past the
 //! `Missing` check leaves the file behind, because the read must happen under
-//! the lock; [`occupied`] reports only the snapshot, and a live holder is
-//! refused with [`Error::Locked`]. A `create` killed between writing the temp
-//! file and the rename leaves `accounts.mks.tmp`, which the next commit
-//! replaces rather than adopts.
+//! the lock; [`occupied`] reports only the snapshot (on Windows, also slot 1),
+//! and a live holder is refused with [`Error::Locked`]. A `create` killed
+//! between writing the temp file and the rename leaves `accounts.mks.tmp`,
+//! which the next commit replaces rather than adopts.
 //!
 //! # What `open` refuses
 //!
 //! - A directory owned by another user or writable by group or others (see
-//!   `perms`). The check is made on the opened directory, which is kept for
-//!   every later operation.
+//!   `perms`). On Unix the check is made on the opened directory, which is
+//!   kept for every later operation.
 //! - A lock or snapshot file owned by another user or readable or writable
-//!   by group or others ([`Error::UnsafeFileMode`]).
-//! - A store directory that is a symbolic link
+//!   by group or others (on Unix `Error::UnsafeFileMode`; on Windows the
+//!   file's own access list is checked instead).
+//! - A store directory that is a symbolic link or, on Windows, a junction
 //!   ([`Error::StoreDirectoryIsLink`]). The lock and snapshot are opened
 //!   without following links and must be regular files.
 //! - A missing snapshot ([`Error::Missing`]): an absent file is not an empty
@@ -79,9 +100,13 @@
 //!
 //! A stale temp file is unlinked after the lock is taken and never adopted,
 //! so only one file is ever authoritative. Before returning a handle, `open`
-//! flushes the snapshot it read and the store directory to the device. A
-//! store that cannot be flushed is refused, because `resign` signs from what
-//! `open` read.
+//! flushes what it read to the device: on Unix the snapshot and the store
+//! directory, on Windows the newest slot. A store that cannot be flushed is
+//! refused, because `resign` signs from what `open` read. On Windows `open`
+//! reads both slot files and takes one by `slots`' rule: the older slot is
+//! the state before the newer, never a second history, and is never taken
+//! while the newer one reads. A stale temp on Windows was left by a build
+//! using the rename layout and is unlinked the same way.
 //!
 //! # Signing
 //!
@@ -109,25 +134,51 @@
 //! lies, or dirty pages lost after `EIO` (hence poisoning, never retry).
 //! Rename atomicity is relied on for ext4, APFS, XFS and btrfs, and cannot be
 //! detected from `std` on FAT, exFAT or FUSE.
+//!
+//! On Windows there is no rename, because Win32 documents no call that
+//! commits the directory entry a rename writes. A commit writes the slot file
+//! not holding the newest image, in place, and flushes it with
+//! `FlushFileBuffers` before [`Durable`] is minted; `open` takes the newer of
+//! the two intact images. A power cut can undo only a write not yet flushed,
+//! which no receipt attests, and cannot bring back a state older than one a
+//! receipt attested. That a returned flush is on the device rests on
+//! Microsoft's documentation and the device, as `fsync` does on Unix
+//! (`medium` cites the pages). On a Windows runner the same instrument drives
+//! kills at syscall boundaries and writes torn in any mix of sectors, in tests
+//! with the same names as the Unix ones. The store directory's own entry in
+//! its parent is not flushed on Windows (see above).
 
-#[cfg(not(unix))]
+// The keystore's storage guarantees rest on Unix's rename(2), directory fsync
+// and flock(2), and on Windows' two slot files flushed in place with
+// FlushFileBuffers and LockFileEx. Any other target is refused at compile
+// time.
+#[cfg(not(any(unix, windows)))]
 compile_error!(
-    "the keystore relies on POSIX rename atomicity, directory fsync and flock; \
-     no non-unix target is supported"
+    "the keystore's storage guarantees are stated for Unix (rename atomicity, \
+     directory fsync, flock) and for Windows (two slot files flushed in place, \
+     LockFileEx); this target is neither"
 );
 
 pub(crate) mod crypt;
+#[cfg(unix)]
 mod directory;
+#[cfg(unix)]
 pub use directory::Directory;
 pub mod format;
 pub mod medium;
 pub(crate) mod perms;
 pub mod sign;
+#[cfg(any(windows, test))]
+mod slots;
 pub mod spend;
 
 use std::collections::BTreeMap;
 use std::fs::{File, TryLockError};
+#[cfg(windows)]
+use std::fs;
 use std::io::Read;
+#[cfg(windows)]
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
@@ -145,12 +196,16 @@ pub use sign::{KeyAccess, SpendSignature};
 pub use spend::SpendAddresses;
 
 use format::{RecordRef, Slot};
+#[cfg(windows)]
+use medium::SLOT1_NAME;
 use medium::{SNAPSHOT_NAME, TEMP_NAME};
 
 pub(crate) const LOCK_NAME: &str = "keystore.lock";
 
-/// Evidence that all four durable steps completed. Constructed only in the
-/// `Ok` arm of [`Keystore::commit`] (checked by
+/// Evidence that the commit's durable steps completed: on Unix all four,
+/// ending with the directory fsync; on Windows the slot writes, ending with
+/// the flush of the slot just written. Constructed only in the `Ok` arm of
+/// [`Keystore::commit`] (checked by
 /// `durable_witness_has_one_construction_site`). The private field keeps code
 /// outside the crate from forging one (`ui/fail/durable_is_not_constructible.rs`).
 #[must_use]
@@ -195,6 +250,7 @@ enum State {
 #[must_use]
 pub struct Keystore<M: Medium = Disk> {
     dir: PathBuf,
+    #[cfg(unix)]
     directory: Directory,
     _lock: File,
     medium: M,
@@ -212,6 +268,39 @@ pub struct Keystore<M: Medium = Disk> {
     /// See [`Keystore::upgraded_from`].
     opened_version: u16,
     on_disk_version: u16,
+    /// On Windows, the two slot files and what this handle knows of them.
+    #[cfg(windows)]
+    slots: Slots,
+}
+
+/// On Windows, the slot files a handle holds, and what it knows of them.
+#[cfg(windows)]
+struct Slots {
+    /// Slot 0 and slot 1, held for the handle's life and shared for reading
+    /// alone (`perms::open_slot`); `None` for a slot file not there yet.
+    held: [Option<File>; 2],
+    /// The slot holding the newest image, which no commit writes, and which
+    /// is on the device: `open` flushes it before the handle exists, and a
+    /// commit flushes what it writes before that becomes the newest. `None`
+    /// only inside `create`, before its commit.
+    newest: Option<usize>,
+    /// Whether slot 0 has yet to become a frame: it holds a store in the
+    /// rename layout, or nothing yet. Until it is one, a build that reads
+    /// only that layout would read it as the snapshot.
+    vacate: bool,
+}
+
+#[cfg(windows)]
+impl Slots {
+    /// Nothing held and nothing to protect: `create`'s state before its
+    /// commit, which creates both files.
+    fn fresh() -> Slots {
+        Slots {
+            held: [None, None],
+            newest: None,
+            vacate: true,
+        }
+    }
 }
 
 /// What a handle needs to read and write its own store. No `Debug` or
@@ -252,10 +341,29 @@ fn io(op: &'static str) -> impl Fn(std::io::Error) -> Error {
     move |e| Error::Io { op, kind: e.kind() }
 }
 
+#[cfg(unix)]
 fn take_lock(dir: &Directory) -> Result<File> {
     let file = dir.open_lock(LOCK_NAME).map_err(io("open lock"))?;
     // Anyone who can open the lock file can hold it, so its mode is checked
-    // before it is locked.
+    // before it is locked, as its access list is on Windows.
+    perms::refuse_unsafe_file(&file, LOCK_NAME)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(Error::Locked),
+        Err(TryLockError::Error(e)) => Err(Error::Io {
+            op: "flock",
+            kind: e.kind(),
+        }),
+    }
+}
+
+#[cfg(windows)]
+fn take_lock(dir: &Path) -> Result<File> {
+    let file = perms::open_private_lock(&dir.join(LOCK_NAME)).map_err(io("open lock"))?;
+    // Anyone who can open the lock file can hold it, so on Windows its own
+    // access list is checked before it is locked (see `perms`), as its mode
+    // is on Unix.
+    #[cfg(windows)]
     perms::refuse_unsafe_file(&file, LOCK_NAME)?;
     match file.try_lock() {
         Ok(()) => Ok(file),
@@ -278,23 +386,93 @@ fn take_lock(dir: &Directory) -> Result<File> {
 /// A lock file without a snapshot is not reported, because it says nothing
 /// about a holder. A live holder is refused with `Locked` when the lock is
 /// taken.
+///
+/// On Windows slot 1 is checked too. `create` writes it before
+/// `accounts.mks`, so slot 1 without the snapshot is what an interrupted
+/// `create` leaves, or the last copy of a store whose snapshot was deleted by
+/// hand; it is refused rather than overwritten.
 pub fn occupied(dir: &Path) -> Option<&'static str> {
     if dir.join(SNAPSHOT_NAME).exists() {
+        return Some("snapshot");
+    }
+    #[cfg(windows)]
+    if dir.join(SLOT1_NAME).exists() {
         return Some("snapshot");
     }
     None
 }
 
+/// Every byte of a slot file, read through the handle held for it. A file
+/// longer than any frame this build writes is refused, without allocating for
+/// it, with the same image-length `Range` error the Unix arm gives an
+/// over-long snapshot.
+#[cfg(windows)]
+fn read_slot(file: &mut File) -> Result<Zeroizing<Vec<u8>>> {
+    let len = file.metadata().map_err(io("stat slot"))?.len();
+    let over = || Error::Range {
+        what: "keystore image length",
+        min: format::MIN_IMAGE_LEN as u64,
+        max: format::MAX_IMAGE_LEN as u64,
+        got: len,
+    };
+    let len = usize::try_from(len)
+        .ok()
+        .filter(|&len| len <= slots::MAX_FRAME_LEN)
+        .ok_or_else(over)?;
+    let mut bytes: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; len]);
+    file.seek(SeekFrom::Start(0)).map_err(io("read slot"))?;
+    file.read_exact(&mut bytes).map_err(io("read slot"))?;
+    Ok(bytes)
+}
+
+/// The image `open` would take from `dir`, read without the lock and without
+/// holding the slots. Tests compare a Windows store by it, as they compare a
+/// Unix store by its snapshot's bytes; the wallet does not call it.
+///
+/// Windows only. Public because the integration tests are a separate crate,
+/// as with `medium::Instrumented`. It takes the password because ordering the
+/// two slots needs the key: the generation is inside the ciphertext.
+#[cfg(windows)]
+pub fn newest_image(dir: &Path, password: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let read = |name: &str| -> Result<Option<Zeroizing<Vec<u8>>>> {
+        match fs::read(dir.join(name)) {
+            Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io("read slot")(e)),
+        }
+    };
+    let slot0 = slots::sort(read(SNAPSHOT_NAME)?)?;
+    let slot1 = slots::sort(read(SLOT1_NAME)?)?;
+    let newest = if slots::take(&slot0, &slot1, password)?.newest == 0 {
+        slot0
+    } else {
+        slot1
+    };
+    match newest {
+        slots::Content::Image(image) | slots::Content::Other(image) => Ok(image),
+        _ => Err(Error::Corrupt {
+            what: "neither slot holds an intact image",
+            offset: 0,
+        }),
+    }
+}
+
+#[cfg(unix)]
 fn occupied_at(dir: &Directory) -> Result<Option<&'static str>> {
     Ok(dir.exists(SNAPSHOT_NAME).map_err(io("stat snapshot"))?.then_some("snapshot"))
 }
+
+#[cfg(windows)]
+fn occupied_at(dir: &Path) -> Result<Option<&'static str>> { Ok(occupied(dir)) }
 
 impl Keystore<Disk> {
     /// Create a new keystore in `dir` (created `0700` if absent).
     ///
     /// Refuses a directory that already holds a snapshot and a live holder of
     /// its lock (`Locked`); an unheld lock file is ignored. Flushes `dir`'s
-    /// parent before the first commit so `dir`'s own entry is durable.
+    /// parent before the first commit so `dir`'s own entry is durable. On
+    /// Windows there is no documented parent flush, and that call does
+    /// nothing.
     pub fn create(dir: &Path, init: &Init<'_>) -> Result<Self> {
         Self::create_with(dir, Disk, init)
     }
@@ -310,15 +488,29 @@ impl<M: Medium> Keystore<M> {
     /// [`Keystore::create`] over an explicit medium (tests inject
     /// [`Instrumented`]).
     pub fn create_with(dir: &Path, medium: M, init: &Init<'_>) -> Result<Self> {
+        #[cfg(unix)]
         let directory = Directory::open(dir, true)?;
-        if let Some(what) = occupied_at(&directory)? {
+        #[cfg(unix)]
+        let store_dir = &directory;
+        #[cfg(windows)]
+        let store_dir = {
+            // Asked without following a link, so a link to nothing is
+            // refused below rather than created through.
+            let absent = matches!(fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+            if absent {
+                perms::create_private_dir(dir).map_err(io("create directory"))?;
+            }
+            perms::refuse_unsafe_dir(dir)?;
+            dir
+        };
+        if let Some(what) = occupied_at(store_dir)? {
             return Err(Error::Exists { what });
         }
-        let lock = take_lock(&directory)?;
+        let lock = take_lock(store_dir)?;
         // Checked again under the lock: a second `create` could pass the
         // check above while a first holds the lock with its snapshot not yet
         // renamed in, then take the lock and seal an empty store over it.
-        if let Some(what) = occupied_at(&directory)? {
+        if let Some(what) = occupied_at(store_dir)? {
             return Err(Error::Exists { what });
         }
         // Derive the key before the first write, so a store that exists has a
@@ -327,6 +519,7 @@ impl<M: Medium> Keystore<M> {
         let key = crypt::derive_key(init.password, &init.salt, kdf)?;
         let mut ks = Keystore {
             dir: dir.to_path_buf(),
+            #[cfg(unix)]
             directory,
             _lock: lock,
             medium,
@@ -343,16 +536,25 @@ impl<M: Medium> Keystore<M> {
             },
             opened_version: format::VERSION,
             on_disk_version: format::VERSION,
+            #[cfg(windows)]
+            slots: Slots::fresh(),
         };
         let image = ks.seal(&[], 0)?;
         // Flush `dir`'s entry in its parent before the first commit, whether
-        // or not this call created `dir`. A failure refuses `create`.
+        // or not this call created `dir`. A failure refuses `create`. On
+        // Windows the medium's `fsync_parent` flushes nothing, as Win32
+        // documents no such call; it is called on both platforms so `create`
+        // runs the same steps in the same order.
+        #[cfg(unix)]
         ks.medium.fsync_parent(&ks.directory)?;
+        #[cfg(windows)]
+        ks.medium.fsync_parent(dir)?;
         let _durable: Durable = ks.commit(&image)?;
         Ok(ks)
     }
 
     /// [`Keystore::open`] over an explicit medium.
+    #[cfg(unix)]
     pub fn open_with(dir: &Path, mut medium: M, unlock: &Unlock<'_>) -> Result<Self> {
         let directory = Directory::open(dir, false)?;
         // Check for the snapshot before touching the lock file, so a `Missing`
@@ -435,6 +637,96 @@ impl<M: Medium> Keystore<M> {
             },
             opened_version: version,
             on_disk_version: version,
+        })
+    }
+
+    /// [`Keystore::open`] over an explicit medium, on Windows: the same
+    /// refusals in the same order as the Unix arm, then both slots read
+    /// through the handles kept for the handle's life, and the newer image
+    /// taken by `slots`' rule.
+    ///
+    /// The Unix arm refuses a snapshot that grows while it is read. Here the
+    /// held handles share read access only, so nothing else can write a slot
+    /// while it is read or while the handle lives.
+    ///
+    /// The image taken is flushed to the device before the handle exists, and
+    /// a store whose newest slot cannot be flushed is refused.
+    #[cfg(windows)]
+    pub fn open_with(dir: &Path, mut medium: M, unlock: &Unlock<'_>) -> Result<Self> {
+        perms::refuse_unsafe_dir(dir)?;
+        // Same order as the Unix arm: check the snapshot before touching the
+        // lock file, read under the lock, and unlink a stale temp without
+        // adopting it.
+        let path = dir.join(SNAPSHOT_NAME);
+        if !path.exists() {
+            return Err(Error::Missing);
+        }
+        let lock = take_lock(dir)?;
+        let temp = dir.join(TEMP_NAME);
+        if temp.exists() {
+            fs::remove_file(&temp).map_err(io("remove stale temp"))?;
+        }
+        let mut held0 = perms::open_slot(&path)?.ok_or(Error::Missing)?;
+        let mut held1 = perms::open_slot(&dir.join(SLOT1_NAME))?;
+        // Check each file's own access list before reading it: on Windows
+        // the directory's list does not decide who can reach a file (see
+        // `perms`).
+        perms::refuse_unsafe_file(&held0, SNAPSHOT_NAME)?;
+        if let Some(file) = held1.as_ref() {
+            perms::refuse_unsafe_file(file, SLOT1_NAME)?;
+        }
+        let slot0 = slots::sort(Some(read_slot(&mut held0)?))?;
+        // A slot 1 longer than any frame is treated as torn rather than
+        // refused: it is never read while slot 0 holds the store, and never
+        // allocated for.
+        let slot1 = match held1.as_mut() {
+            None => slots::Content::Absent,
+            Some(file) => match read_slot(file) {
+                Err(Error::Range { .. }) => slots::Content::Torn,
+                read => slots::sort(Some(read?))?,
+            },
+        };
+        let taken = slots::take(&slot0, &slot1, unlock.password)?;
+        let vacate = matches!(slot0, slots::Content::Other(_));
+        // Flush the image taken to the device before the handle exists.
+        // `take` reads what the cache holds, which after a commit whose flush
+        // failed, or whose process ended between its write and its flush, can
+        // be an image the device never received and no receipt attests.
+        // `resign` signs the reservation it finds without committing, so
+        // without this flush a key could sign from a state a power cut could
+        // take back. Flushing here covers every command, and a failure refuses
+        // the open, since an image that cannot be made durable must not be
+        // signed from. It also lets a commit overwrite the other slot at once,
+        // because the newest is on the device before any write.
+        let newest = taken.newest;
+        let standing = if newest == 0 { Some(&held0) } else { held1.as_ref() };
+        let standing = standing.ok_or(Error::Io {
+            op: "flush_standing",
+            kind: std::io::ErrorKind::NotFound,
+        })?;
+        medium.flush_standing(dir, newest, standing)?;
+        Ok(Keystore {
+            dir: dir.to_path_buf(),
+            _lock: lock,
+            medium,
+            state: State::Live {
+                generation: taken.parsed.generation,
+                slots: taken.parsed.slots,
+            },
+            master: taken.parsed.master,
+            crypto: StoreCrypto {
+                key: taken.key,
+                kdf: taken.kdf,
+                salt: taken.salt,
+                nonce_seed: unlock.nonce_seed,
+            },
+            opened_version: taken.version,
+            on_disk_version: taken.version,
+            slots: Slots {
+                held: [Some(held0), held1],
+                newest: Some(newest),
+                vacate,
+            },
         })
     }
 
@@ -578,8 +870,15 @@ impl<M: Medium> Keystore<M> {
 
     /// The four steps, in order, and the only constructor of [`Durable`]. On
     /// any error the handle is poisoned and no further filesystem operation
-    /// is performed, so the disk holds what the interrupted step left.
+    /// is performed, so the disk holds what the interrupted step left. On
+    /// Windows the steps are the slot writes in `Keystore::write_slots`,
+    /// which return into the same arms.
     fn commit(&mut self, image: &[u8]) -> Result<Durable> {
+        #[cfg(windows)]
+        let dir = self.dir.clone();
+        #[cfg(windows)]
+        let outcome = self.write_slots(&dir, image);
+        #[cfg(unix)]
         let outcome = (|| -> Result<()> {
             let written = self.medium.write_temp(&self.directory, image)?;
             let synced = self.medium.fsync_file(written)?;
@@ -598,6 +897,36 @@ impl<M: Medium> Keystore<M> {
                 Err(e)
             }
         }
+    }
+
+    /// The Windows commit: `image` framed, written into the slot that does not
+    /// hold the newest image, and flushed.
+    ///
+    /// Crash safety rests on three rules. The newest slot is on the device
+    /// before the other is written: `open` flushed it before the handle
+    /// existed, and each commit flushes what it writes before that becomes the
+    /// newest. The write is flushed before this returns, so before `Durable`
+    /// exists. A plain image in slot 0 is overwritten, with the vacant frame,
+    /// only once slot 1 holds a flushed frame; from then on a build that reads
+    /// only the rename layout refuses the store.
+    ///
+    /// When neither slot holds anything yet (`create`), the image goes to
+    /// slot 1 and slot 0 is made vacant after it, so an existing
+    /// `accounts.mks` means an image is on the device.
+    #[cfg(windows)]
+    fn write_slots(&mut self, dir: &Path, image: &[u8]) -> Result<()> {
+        let target = if self.slots.newest == Some(1) { 0 } else { 1 };
+        let framed = slots::frame(image)?;
+        let written = self.medium.write_slot(dir, target, &mut self.slots.held[target], &framed)?;
+        let _flushed = self.medium.flush_slot(written)?;
+        if target == 1 && self.slots.vacate {
+            let vacant = slots::frame(&[])?;
+            let written = self.medium.write_slot(dir, 0, &mut self.slots.held[0], &vacant)?;
+            let _flushed = self.medium.flush_slot(written)?;
+        }
+        self.slots.vacate = false;
+        self.slots.newest = Some(target);
+        Ok(())
     }
 
     /// Build the record list for an image: the current slots, optionally with

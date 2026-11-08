@@ -13,7 +13,8 @@
 # rustls, ring and webpki-roots. Checking all features covers them.
 all-features = true
 
-# `targets` is unset so every target triple in the lockfile is checked.
+# `targets` is unset so every target triple in the lockfile is checked,
+# including `wasi` and the `windows-sys` crates that the Windows builds use.
 
 # `crates/mochimo-crypto/ui/downstream` is a separate test workspace whose
 # only dependency is this crate by path, so it adds no third-party crates.
@@ -57,10 +58,15 @@ allow = [
 ignore = true
 
 [bans]
-# Duplicate versions are allowed: the current duplicates (`syn`, `toml`,
-# `winnow`, `serde_spanned`, `toml_datetime`, `windows-sys`) come only from
-# dev-dependencies (`trybuild`, `toml`) and are not in a wallet build. The
-# duplicate that matters is denied by name below.
+# Duplicate versions are allowed. The duplicates `syn`, `toml`, `winnow`,
+# `serde_spanned` and `toml_datetime` come only from dev-dependencies
+# (`trybuild`, `toml`) and are not in a wallet build.
+#
+# `windows-sys` 0.52 and 0.61 are both linked on aarch64 Windows: 0.52 by
+# `ring` under `mesh-https`, 0.61 by this crate on every Windows target.
+# They share no trait, so the duplicate costs size, not correctness.
+#
+# The duplicate that matters is denied by name below.
 multiple-versions = "allow"
 # Every dependency must have an explicit version requirement.
 wildcards = "deny"

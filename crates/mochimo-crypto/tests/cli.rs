@@ -3776,8 +3776,9 @@ fn the_listing_needs_no_node_and_no_seed() {
 // confirmation with echo on, a store the typed password opens, and the
 // phrase reproducing the store's destination both in-process and through
 // `create --from-phrase`. Not covered: terminal scrollback, a `SIGKILL`
-// inside the echo-off window.
-#[cfg(not(miri))]
+// inside the echo-off window. The module is compiled only on Unix, where
+// `script(1)` exists.
+#[cfg(all(unix, not(miri)))]
 mod pty {
     use std::io::{Read, Write};
     use std::path::{Path, PathBuf};

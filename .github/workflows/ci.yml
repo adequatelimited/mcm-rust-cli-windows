@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -29,9 +29,12 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - name: Clone the commit
+      - name: Clone the commit under the user's profile
+        # The keystore refuses folders that grant other accounts, which a
+        # folder outside the profile can on Windows.
         run: |
           base=$HOME
+          if [ -n "${USERPROFILE:-}" ]; then base=$(cygpath -u "$USERPROFILE"); fi
           git clone --quiet --no-checkout "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$base/src"
           git -C "$base/src" fetch --quiet origin "$GITHUB_SHA"
           git -C "$base/src" checkout --quiet --detach "$GITHUB_SHA"

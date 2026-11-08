@@ -246,10 +246,20 @@ fn a_refused_connection_is_reported_by_kind() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("bind: {e}"));
         l.local_addr().unwrap_or_else(|e| panic!("local_addr: {e}")).port()
     };
-    let err = transport(&format!("http://127.0.0.1:{port}"))
-        .post("/call", b"{}")
-        .err()
-        .unwrap_or_else(|| panic!("a refused connection returned a body"));
+    // Longer timeouts than `transport`'s. Linux and macOS report a refused
+    // connect at once, but Windows retries it for longer than 500 ms, so the
+    // shorter timeout would report `Timeout` instead of `Connect`. Five
+    // seconds outlasts those retries and costs nothing where the refusal is
+    // immediate.
+    let err = UreqTransport::with_timeouts(
+        &format!("http://127.0.0.1:{port}"),
+        Duration::from_secs(5),
+        Duration::from_secs(6),
+    )
+    .unwrap_or_else(|e| panic!("transport: {e}"))
+    .post("/call", b"{}")
+    .err()
+    .unwrap_or_else(|| panic!("a refused connection returned a body"));
     assert!(
         matches!(err, Error::Transport { kind: TransportKind::Connect, .. }),
         "{err:?}"

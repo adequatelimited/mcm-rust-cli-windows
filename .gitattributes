@@ -1,1 +1,27 @@
+# Every text file is checked out with LF line endings, on every platform.
+#
+# Git for Windows installs with `core.autocrlf=true`, which rewrites text files
+# to CRLF on checkout. This tree cannot take that: the invariant suite scans
+# the source byte for byte, the JSON fixtures are "never edited" and replayed
+# as recorded, and trybuild compares compiler output against checked-in
+# `.stderr` files. A CRLF checkout changes the bytes every one of those reads,
+# and the board would go red on Windows for a reason that is not in any
+# commit. `text=auto` leaves alone what git detects as binary, and git detects
+# by content rather than by name -- which is why the `.bin` files are named.
+* text=auto eol=lf
+
+# Every `.bin` file, never converted in either direction: the fixture corpus
+# and the keystore snapshots in `crates/mochimo-crypto/testdata/`. Detection
+# is not enough for them, because two are printable text by content:
+# `M-requests.bin` holds request records as JSON lines, and
+# `C-addr-from-wots-fill42_in.bin` is 2,144 bytes of 0x42 -- `git ls-files
+# --eol -- '*.bin'` prints them as `i/lf` and `i/none`. Neither holds a CR, so
+# a checkout leaves their bytes as they are; but a `.bin` git reads as text
+# and that holds a CR LF pair would have the pair rewritten by `git add`, and
+# its bytes are the thing it exists to hold. Named, the rule no longer depends
+# on what the next one happens to contain.
+*.bin -text
+
+# Vendored standards texts whose bytes are pinned by hash: never converted at
+# all, in either direction.
 docs/standards/*.txt -text

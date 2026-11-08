@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> ui/fail/medium_slot_steps_are_not_reorderable.rs:22:26
+   |
+22 |     let _ = m.flush_slot(flushed);
+   |               ---------- ^^^^^^^ expected `SlotWritten`, found `Flushed`
+   |               |
+   |               arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/keystore/medium.rs
+   |
+   |     fn flush_slot(&mut self, written: SlotWritten) -> Result<Flushed>;
+   |        ^^^^^^^^^^

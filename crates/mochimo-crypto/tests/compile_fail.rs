@@ -137,12 +137,27 @@ fn every_ui_case_compiles_or_fails_for_its_pinned_reason() {
         );
     }
 
+    // The medium step-order case is per platform: the rename layout on Unix,
+    // the slot layout on Windows. Each case names methods that the other
+    // platform's `Medium` does not have, so each is compiled only on its own
+    // platform. Both are counted above.
+    let registered: Vec<&std::path::PathBuf> = fails.iter().filter(|case| pinned_here(case)).collect();
+    assert_eq!(
+        fails.len() - registered.len(),
+        1,
+        "exactly one of the two medium order pins is another platform's; {} of {} fail cases \
+         are registered here",
+        registered.len(),
+        fails.len()
+    );
+
     // Printed before trybuild runs (on drop of `TestCases`); `invariants.rs`
     // reads this line to confirm the test ran and measured something.
     println!(
-        "\x20 compile-fail partition: {} fail case(s) ({secret_cases} secret, \
+        "\x20 compile-fail partition: {} fail case(s) registered here of {} ({secret_cases} secret, \
          {account_cases} account, {keystore_cases} keystore, {signing_cases} signing, \
          {terminal_cases} terminal), {} pass case(s), every fail case with a pinned .stderr",
+        registered.len(),
         fails.len(),
         passes.len()
     );
@@ -153,7 +168,19 @@ fn every_ui_case_compiles_or_fails_for_its_pinned_reason() {
     t.pass("ui/pass/*.rs");
 
     // Must not compile, each for the reason its .stderr records.
-    t.compile_fail("ui/fail/*.rs");
+    for case in registered {
+        t.compile_fail(std::path::Path::new("ui/fail").join(case.file_name().unwrap_or_default()));
+    }
+}
+
+/// Whether `case` pins something this platform builds: every case but the
+/// medium's two order pins, which belong to one platform's steps each.
+fn pinned_here(case: &std::path::Path) -> bool {
+    match stem(case).as_str() {
+        "medium_steps_are_not_reorderable" => cfg!(unix),
+        "medium_slot_steps_are_not_reorderable" => cfg!(windows),
+        _ => true,
+    }
 }
 
 /// A case's file stem, for the per-subject counts.

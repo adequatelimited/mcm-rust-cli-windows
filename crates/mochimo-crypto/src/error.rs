@@ -120,9 +120,56 @@ pub enum Error {
     },
     /// A keystore file, the snapshot or the lock, is readable or writable by
     /// group or others. The file counterpart of
-    /// [`Error::UnsafePermissions`].
+    /// [`Error::UnsafePermissions`]; on Windows the same refusal is
+    /// `UnsafeFileAcl`.
     #[cfg(unix)]
     UnsafeFileMode { file: &'static str, mode: u32 },
+    /// The keystore directory's access list lets a trustee other than this
+    /// user, `SYSTEM` or the Administrators group write to it. This is the
+    /// Windows counterpart of [`Error::UnsafePermissions`]; it is a separate
+    /// variant because a Windows directory has no mode to report.
+    ///
+    /// `trustee` is the security identifier granted the write, in `S-1-...`
+    /// form; it is `S-1-1-0` (Everyone) when the directory has no access list,
+    /// since a null list grants everyone access. `rights` is the access mask
+    /// of the granting entry, or `WRITE_DAC | READ_CONTROL` for a directory
+    /// owned by someone else. The accepted trustees and the rights that count
+    /// as write are defined in the Windows arm of `keystore::perms`.
+    #[cfg(windows)]
+    UnsafeAcl {
+        trustee: String,
+        rights: u32,
+    },
+    /// A store file (`file`: a slot file or the lock) whose own access list
+    /// lets a trustee other than this user, `SYSTEM` or the Administrators
+    /// group read or write it, or which someone else owns.
+    ///
+    /// Separate from [`Error::UnsafeAcl`] because a file is refused for read
+    /// access as well as write (a slot file holds the ciphertext), and the
+    /// remedy is to fix that file's own list. `trustee` and `rights` are as in
+    /// `UnsafeAcl`.
+    #[cfg(windows)]
+    UnsafeFileAcl {
+        file: &'static str,
+        trustee: String,
+        rights: u32,
+    },
+    /// Windows refused to open one of the store's two slot files with system
+    /// error `code`, typically `ERROR_SHARING_VIOLATION`: another process
+    /// holds the file open without sharing write access.
+    ///
+    /// On Windows `open` holds both slot files for the handle's lifetime,
+    /// sharing read access only, so a program that already holds one without
+    /// sharing write (an antivirus scanner, search indexer, or backup or sync
+    /// agent) makes the open fail. The error is raised at `open`, before
+    /// anything is read or reserved, so nothing is changed and no handle is
+    /// poisoned. Once a handle holds its slots, no commit can meet this error.
+    /// The code indicates the usual cause but does not prove it; every other
+    /// code is reported as `Io`.
+    #[cfg(windows)]
+    HeldOpen {
+        code: i32,
+    },
     /// The store path's last component is a symbolic link. Refused rather
     /// than followed, so a planted link cannot redirect the wallet to another
     /// directory.
@@ -575,6 +622,32 @@ impl fmt::Display for Error {
                  again. On a filesystem that keeps no Unix modes, such as FAT or exFAT, `chmod` \
                  has no effect: remount it with `fmask=077` (or `umask=077`), or move the store \
                  to a filesystem that keeps them"
+            ),
+            #[cfg(windows)]
+            Error::UnsafeAcl { trustee, rights } => write!(
+                f,
+                "keystore directory lets {trustee} write to it (access mask {rights:#010x}), and \
+                 {trustee} is neither this user, SYSTEM nor the Administrators group; refusing to \
+                 hold key material there"
+            ),
+            #[cfg(windows)]
+            Error::UnsafeFileAcl { file, trustee, rights } => write!(
+                f,
+                "keystore file {file} lets {trustee} read or write it (access mask {rights:#010x}), \
+                 and {trustee} is neither this user, SYSTEM nor the Administrators group; refusing \
+                 to use it. On Windows a file's own access list decides who may open it, whatever \
+                 the directory's says, and a file moved or copied into the store directory can \
+                 bring or inherit one that admits others: give {file} a list granting this user \
+                 alone, and run the command again"
+            ),
+            #[cfg(windows)]
+            Error::HeldOpen { code } => write!(
+                f,
+                "keystore: Windows refused to open accounts.mks or accounts.mks.1 (system error \
+                 {code}). The usual cause is another program holding the file open without \
+                 sharing write -- an antivirus scanner, a search indexer, a backup or sync agent. \
+                 Nothing was read or changed; run the command again, and if the refusal persists, \
+                 exclude the keystore directory from that program"
             ),
             Error::StoreDirectoryIsLink => f.write_str(
                 "keystore directory is a symbolic link; a store is never opened through one, so \

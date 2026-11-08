@@ -1,32 +1,57 @@
 // Copyright (c) 2026 Adequate Systems HK Limited
 // Licensed under the Mochimo Cryptocurrency Engine License Agreement 1.0; see LICENSE.md.
 
-//! The Unix permission model.
+//! The keystore permission model.
 //!
 //! Every mode bit this crate sets or reads is defined here: `0600` for the
 //! lock file and temp snapshot, `0700` for a store directory this crate
 //! creates, the group- and other-writable bits that cause a directory to be
 //! refused, the group and other read and write bits that cause a store file
 //! to be refused, and the required owner of both. [`super::Directory`] opens
-//! every file and directory the store uses with these constants.
+//! every file and directory the store uses on Unix with these constants.
 //!
-//! This is not a portability layer: a non-Unix build fails at `lib.rs`'s
+//! A build for a target that is neither Unix nor Windows fails at `lib.rs`'s
 //! and [`crate::keystore`]'s `compile_error!`.
 //!
-//! The rule is that the directory and files are reachable only by their
-//! owner: a directory owned or writable by another local user is refused, as
-//! is a store file another local user owns or can read or write. The file
-//! check is needed as well as the directory check: the store directory need
-//! only refuse others write, so it can be `0755`, and a file restored from a
-//! copy that kept no modes can be `0644`. Such a snapshot lets every local
-//! user try passwords against the ciphertext offline.
+//! # Unix and Windows
+//!
+//! The items in this file are the Unix implementation: the two creation
+//! modes, the refused bits, `refuse_unsafe_dir`, which checks an opened
+//! directory handle, and `refuse_unsafe_file`, which checks an opened lock
+//! or snapshot. The Windows implementation is the [`windows`]
+//! submodule. Its `refuse_unsafe_dir` takes a path instead of a handle,
+//! because a Windows store is opened by path. It also provides
+//! `create_private_dir` and `open_private_lock`, which create the directory
+//! and open the lock file; `create_slot` and `open_slot`, which create and
+//! open the two slot files; and its own `refuse_unsafe_file`, which checks a
+//! store file's access list. `keystore` selects between the implementations
+//! with `cfg` at its call sites, and only Windows code calls the first four.
+//! There is no trait, because a build contains exactly one implementation.
+//!
+//! Both implementations enforce the same rule: the directory and files are
+//! reachable only by their owner, and a directory owned or writable by
+//! another local user is refused, as is a store file another local user owns
+//! or can read or write. The file check matters on Unix too: the store
+//! directory need only refuse others write, so it can be `0755`, and a file
+//! restored from a copy that kept no modes can be `0644`. Such a snapshot
+//! lets every local user try passwords against the ciphertext offline.
 //!
 //! [`Error::UnsafePermissions`] carries the offending Unix `mode: u32`,
 //! displayed in octal, so callers matching on it see mode bits.
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::{
+    create_private_dir, create_slot, open_private_lock, open_slot, refuse_unsafe_dir, refuse_unsafe_file,
+};
+
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
+#[cfg(unix)]
 use crate::error::{Error, Result};
 
 /// The mode for every file this crate creates: owner read and write only.
@@ -34,12 +59,14 @@ use crate::error::{Error, Result};
 /// The temp snapshot holds a plaintext header over a sealed body and the
 /// lock file holds no bytes; neither is key material, but neither should be
 /// readable by other users.
+#[cfg(unix)]
 pub(crate) const FILE_MODE: rustix::fs::Mode = rustix::fs::Mode::from_bits_retain(0o600);
 
 /// The mode for a store directory this crate creates: owner only.
 ///
 /// An existing directory keeps its mode and is checked by
 /// [`refuse_unsafe_dir`] instead.
+#[cfg(unix)]
 pub(crate) const DIR_MODE: rustix::fs::Mode = rustix::fs::Mode::from_bits_retain(0o700);
 
 /// Bits that cause a lock or snapshot file to be refused: group read and
@@ -53,6 +80,7 @@ const REFUSED_FILE_BITS: u32 = 0o066;
 /// Only write bits are refused. A writable directory lets another local user
 /// rename the snapshot under a live handle, which breaks commit atomicity; a
 /// readable one only discloses file names.
+#[cfg(unix)]
 const REFUSED_WRITE_BITS: u32 = 0o022;
 
 /// Refuse a store directory another local user could write to.
@@ -69,6 +97,7 @@ const REFUSED_WRITE_BITS: u32 = 0o022;
 ///   the effective user. The owner is checked first because another owner
 ///   could change the mode at any time.
 /// - [`Error::UnsafePermissions`] if group- or other-write is set.
+#[cfg(unix)]
 pub(crate) fn refuse_unsafe_dir(dir: &File) -> Result<()> {
     let meta = dir.metadata().map_err(|e| Error::Io { op: "stat directory", kind: e.kind() })?;
     if !meta.is_dir() {

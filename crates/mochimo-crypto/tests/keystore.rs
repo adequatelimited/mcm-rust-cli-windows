@@ -15,6 +15,7 @@
 #[path = "support/keystore_harness.rs"]
 mod keystore_harness;
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use keystore_harness::{
@@ -34,7 +35,7 @@ fn read_snapshot(dir: &ScratchDir) -> Vec<u8> {
 }
 
 fn write_snapshot(dir: &ScratchDir, bytes: &[u8]) {
-    std::fs::write(dir.path().join("accounts.mks"), bytes).unwrap_or_else(|e| panic!("{e}"));
+    dir.write_snapshot(bytes);
 }
 
 /// Position `i`, reached by advancing from zero (`WotsIndex::from_raw` is
@@ -252,7 +253,7 @@ fn a_store_sealed_by_an_earlier_build_opens_and_is_reproduced_byte_for_byte() {
         let _durable = ks.adopt_master(&m).unwrap_or_else(|e| panic!("{e}"));
         ks.add(Account::derive(&m, 0)).unwrap_or_else(|e| panic!("{e}"));
     }
-    let fresh = read_snapshot(&dir2);
+    let fresh = dir2.snapshot_bytes_under(PASSWORD);
     let first_difference = fresh.iter().zip(V4_IMAGE.iter()).position(|(a, b)| a != b);
     assert!(
         fresh.len() == V4_IMAGE.len() && first_difference.is_none(),
@@ -650,10 +651,25 @@ fn open_refuses_a_missing_snapshot_and_create_refuses_an_existing_store() {
 trait Mode0700 {
     fn mode_0700(&mut self) -> &mut Self;
 }
+#[cfg(unix)]
 impl Mode0700 for std::fs::DirBuilder {
     fn mode_0700(&mut self) -> &mut Self {
         use std::os::unix::fs::DirBuilderExt;
         self.mode(0o700)
+    }
+}
+/// Does nothing on Windows: `DirBuilder` takes no security descriptor there,
+/// so the directory inherits its parent's access list. Inside the user's
+/// profile that list grants only the user, `SYSTEM` and Administrators, which
+/// the keystore's check accepts. Under a parent that lets other users write
+/// (a folder directly under `C:\` grants `Authenticated Users` modify
+/// rights), the three tests that create their own directory through this are
+/// refused as `UnsafeAcl`. Every other scratch store here is created by the
+/// keystore itself, with its own protected access list.
+#[cfg(windows)]
+impl Mode0700 for std::fs::DirBuilder {
+    fn mode_0700(&mut self) -> &mut Self {
+        self
     }
 }
 
@@ -778,6 +794,7 @@ fn records_are_addressed_by_tag_not_position() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn medium_sequence_is_exactly_the_four_steps_with_their_arguments() {
     let dir = ScratchDir::new("sequence");
@@ -808,13 +825,72 @@ fn medium_sequence_is_exactly_the_four_steps_with_their_arguments() {
     );
 }
 
-/// `open` refuses a store whose snapshot and directory it cannot flush, with
-/// the flush's error, and opens it once the flush succeeds. No handle exists
-/// over an image that may still be only in the cache, so `resign`, which
-/// signs without committing, never signs from one. The instrument performs
-/// the flush and then reports it failed.
+/// The Windows form of the test above: each commit writes and flushes the
+/// slot that does not hold the newest image, with the frame's length, which
+/// is 46 bytes more than the image's.
+///
+/// `create` first calls `fsync_parent` on the store directory's parent (on
+/// Windows this flushes nothing; `Instrumented` records it), then writes
+/// slot 1 and slot 0's vacant frame. Later commits alternate slots. `open`
+/// flushes the newest slot before it returns a handle, so a reopened handle's
+/// commits are the same two steps.
+#[cfg(windows)]
 #[test]
-fn open_refuses_a_store_whose_snapshot_it_cannot_flush() {
+fn medium_sequence_is_exactly_the_slot_steps_with_their_arguments() {
+    const OVERHEAD: usize = 46;
+    let dir = ScratchDir::new("sequence");
+    let slot0 = dir.path().join("accounts.mks");
+    let slot1 = dir.path().join("accounts.mks.1");
+    let parent = dir.path().parent().unwrap_or_else(|| panic!("a scratch directory has a parent")).to_path_buf();
+    let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init()).unwrap_or_else(|e| panic!("{e}"));
+    let len = OVERHEAD + read_snapshot(&dir).len();
+    assert_eq!(
+        ks.medium().calls(),
+        &[
+            Call::FsyncParent { dir: parent },
+            Call::WriteSlot { path: slot1.clone(), len },
+            Call::FlushSlot { path: slot1.clone() },
+            Call::WriteSlot { path: slot0.clone(), len: OVERHEAD },
+            Call::FlushSlot { path: slot0.clone() },
+        ],
+        "create is the parent named, then slot 1's image and then slot 0's vacant frame, each flushed"
+    );
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    ks.medium_mut().reset_calls();
+    let _receipt = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).unwrap_or_else(|e| panic!("{e}"));
+    let len = OVERHEAD + read_snapshot(&dir).len();
+    assert_eq!(
+        ks.medium().calls(),
+        &[Call::WriteSlot { path: slot1.clone(), len }, Call::FlushSlot { path: slot1.clone() }],
+        "the third commit is not slot 1's, written and flushed"
+    );
+    drop(ks);
+    let mut ks = keystore_harness::reopen_with("sequence", dir.path(), || Instrumented::new(Disk))
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        ks.medium().calls(),
+        &[Call::FlushStanding { path: slot1 }],
+        "open did not flush the newest slot, slot 1, before the handle existed"
+    );
+    ks.medium_mut().reset_calls();
+    ks.persist_settled(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}"));
+    let len = OVERHEAD + read_snapshot(&dir).len();
+    assert_eq!(
+        ks.medium().calls(),
+        &[Call::WriteSlot { path: slot0.clone(), len }, Call::FlushSlot { path: slot0 }],
+        "a reopened handle's first commit is not slot 0's, written and flushed"
+    );
+}
+
+/// `open` refuses a store whose image it cannot flush (on Unix the snapshot
+/// and its directory, on Windows the newest slot), with the flush's error,
+/// and opens it once the flush succeeds. No handle exists over an image that
+/// may still be only in the cache, so `resign`, which signs without
+/// committing, never signs from one. The instrument performs the flush and
+/// then reports it failed.
+#[test]
+fn open_refuses_a_store_whose_newest_slot_it_cannot_flush() {
     let dir = ScratchDir::new("open-flush");
     let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
     ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
@@ -832,14 +908,247 @@ fn open_refuses_a_store_whose_snapshot_it_cannot_flush() {
             op: "flush_standing",
             kind: std::io::ErrorKind::Interrupted
         }),
-        "an open whose flush of the snapshot failed was not refused by that flush"
+        "an open whose flush of the newest slot failed was not refused by that flush"
     );
     assert!(keystore_harness::open(dir.path()).is_ok(), "the store does not open once the flush succeeds");
+}
+
+/// The bytes a torn slot write leaves, for the two walks below: each
+/// 512-byte sector comes from `frame` where `mask` has its bit set and from
+/// `stood` otherwise, zero past both, with length `len`. A `len` of `None`
+/// means no file, which only a write that creates the slot can leave.
+#[cfg(windows)]
+fn torn(stood: Option<&[u8]>, frame: &[u8], mask: usize, len: Option<usize>) -> Option<Vec<u8>> {
+    const SECTOR: usize = 512;
+    let len = len?;
+    let stood = stood.unwrap_or(&[]);
+    Some(
+        (0..len)
+            .map(|at| {
+                let source = if mask & (1 << (at / SECTOR)) != 0 { frame } else { stood };
+                source.get(at).copied().unwrap_or(0)
+            })
+            .collect(),
+    )
+}
+
+/// Every tear of one write: no file when the write creates the slot, and
+/// each mix of the frame's sectors with the standing sectors, at both the
+/// standing length and the frame's length.
+#[cfg(windows)]
+fn tears(creates: bool, stood_len: usize, frame_len: usize) -> Vec<(usize, Option<usize>)> {
+    let sectors = stood_len.max(frame_len).div_ceil(512);
+    let mut out = if creates { vec![(0, None)] } else { Vec::new() };
+    for mask in 0usize..(1 << sectors) {
+        out.push((mask, Some(stood_len)));
+        out.push((mask, Some(frame_len)));
+    }
+    out
+}
+
+/// Whether a tear left exactly the frame: its full length, with every sector
+/// taken from it.
+#[cfg(windows)]
+fn left_the_frame(mask: usize, len: Option<usize>, frame_len: usize) -> bool {
+    len == Some(frame_len) && (0..frame_len.div_ceil(512)).all(|sector| mask & (1 << sector) != 0)
+}
+
+/// `create` stopped after each of its five steps, or with either of its two
+/// writes torn in every way `tears` lists, leaves either no store or the
+/// whole store. Until `accounts.mks` exists there is no store, and `open`
+/// refuses the directory as `Missing`. Once it exists, whatever the tear left
+/// in it, `open` takes the image `create` sealed from slot 1, which was
+/// flushed before `accounts.mks` was written. A later `create` refuses a
+/// directory holding only slot 1, because a store whose `accounts.mks` was
+/// deleted looks the same (`occupied`), and succeeds in an empty one.
+#[cfg(windows)]
+#[test]
+fn create_stopped_or_torn_at_every_step_leaves_no_store_or_the_whole_one() {
+    const STEPS: [&str; 5] = ["fsync_parent", "write_slot", "flush_slot", "write_slot", "flush_slot"];
+    let control = ScratchDir::new("create-walk");
+    let ks = Keystore::create_with(control.path(), Instrumented::new(Disk), &keystore_harness::init())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let sealed = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+    let calls = ks.medium().calls().to_vec();
+    let lens: Vec<usize> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::WriteSlot { len, .. } => Some(*len),
+            _ => None,
+        })
+        .collect();
+    assert_eq!((calls.len(), lens.len()), (STEPS.len(), 2), "create is not five calls with two writes: {calls:?}");
+    drop(ks);
+    let observe = |dir: &ScratchDir, at: &str| -> bool {
+        match keystore_harness::open(dir.path()) {
+            Err(Error::Missing) => {
+                let slot1 = dir.path().join("accounts.mks.1").exists();
+                let again = Keystore::create(dir.path(), &keystore_harness::init()).err();
+                let want = slot1.then_some(Error::Exists { what: "snapshot" });
+                assert_eq!(again, want, "{at}: a later create met {again:?} with slot 1 there: {slot1}");
+                false
+            }
+            Ok(ks) => {
+                let generation = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+                assert_eq!(generation, sealed, "{at}: the store opened at another generation than create sealed");
+                true
+            }
+            Err(e) => panic!("{at}: neither no store nor the whole one: {e}"),
+        }
+    };
+    let mut driven = 0usize;
+    for k in 1..=STEPS.len() {
+        let at = format!("create stop {k}");
+        let dir = ScratchDir::new("create-walk-stop");
+        let mut medium = Instrumented::new(Disk);
+        medium.stop_after(Some(k));
+        let err = Keystore::create_with(dir.path(), medium, &keystore_harness::init()).err();
+        assert_eq!(
+            err,
+            Some(Error::Io {
+                op: STEPS[k - 1],
+                kind: std::io::ErrorKind::Interrupted
+            }),
+            "{at}: not the injected error"
+        );
+        assert_eq!(observe(&dir, &at), k >= 4, "{at}: taken as the wrong side of create");
+        driven += 1;
+    }
+    for (k, frame_len) in [(2usize, lens[0]), (4, lens[1])] {
+        for (mask, len) in tears(true, 0, frame_len) {
+            let at = format!("create tear of call {k}, sectors {mask:#b}, {len:?} bytes");
+            let dir = ScratchDir::new("create-walk-tear");
+            let mut medium = Instrumented::new(Disk);
+            medium.tear_after(
+                Some(k),
+                Box::new(move |stood: Option<&[u8]>, frame: &[u8]| -> Option<Vec<u8>> { torn(stood, frame, mask, len) }),
+            );
+            let err = Keystore::create_with(dir.path(), medium, &keystore_harness::init()).err();
+            assert_eq!(
+                err,
+                Some(Error::Io {
+                    op: "write_slot",
+                    kind: std::io::ErrorKind::Interrupted
+                }),
+                "{at}: not the injected error"
+            );
+            assert_eq!(observe(&dir, &at), k == 4 && len.is_some(), "{at}: taken as the wrong side of create");
+            driven += 1;
+        }
+    }
+    println!("  create walk: {driven} interruption point(s), five stops and every tear of two writes");
+}
+
+/// The migrating commit is the first commit on Windows of a store in the
+/// rename layout: it writes and flushes slot 1, then overwrites
+/// `accounts.mks` with the vacant frame and flushes it. Stopped after each of
+/// its four steps, or with either write torn in every way `tears` lists, it
+/// leaves the plain image or the new one, and `open` takes it without a
+/// refusal: the plain image while slot 1 holds no intact frame, the new one
+/// once it does.
+#[cfg(windows)]
+#[test]
+fn a_migrating_commit_stopped_or_torn_at_every_step_takes_the_plain_image_or_the_new_one() {
+    const STEPS: [&str; 4] = ["write_slot", "flush_slot", "write_slot", "flush_slot"];
+    // A store in the rename layout: created, then its image written back as
+    // a plain `accounts.mks` with slot 1 removed, and opened again.
+    let seed = |dir: &ScratchDir| -> Keystore<Instrumented<Disk>> {
+        let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+        ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+        drop(ks);
+        let image = dir.snapshot_bytes();
+        dir.write_snapshot(&image);
+        let mut ks = keystore_harness::reopen_with("migrating walk", dir.path(), || Instrumented::new(Disk))
+            .result
+            .unwrap_or_else(|e| panic!("{e}"));
+        ks.medium_mut().reset_calls();
+        ks
+    };
+    let control = ScratchDir::new("migrating-walk");
+    let mut ks = seed(&control);
+    let plain_len = usize::try_from(
+        std::fs::metadata(control.path().join("accounts.mks")).unwrap_or_else(|e| panic!("{e}")).len(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let pre = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+    let _receipt = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).unwrap_or_else(|e| panic!("{e}"));
+    let calls = ks.medium().calls().to_vec();
+    let lens: Vec<usize> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::WriteSlot { len, .. } => Some(*len),
+            _ => None,
+        })
+        .collect();
+    assert_eq!((calls.len(), lens.len()), (STEPS.len(), 2), "the migrating commit is not four calls with two writes: {calls:?}");
+    drop(ks);
+    let observe = |dir: &ScratchDir, at: &str| -> bool {
+        let ks = keystore_harness::open(dir.path()).unwrap_or_else(|e| panic!("{at}: the store was refused: {e}"));
+        let view = ks
+            .view(&IMPORTED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("{at}: the imported account vanished"));
+        let post = view.pending.is_some();
+        let generation = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(generation, if post { pre + 1 } else { pre }, "{at}: the generation and the reservation disagree");
+        post
+    };
+    let mut driven = 0usize;
+    for k in 1..=STEPS.len() {
+        let at = format!("migrating stop {k}");
+        let dir = ScratchDir::new("migrating-walk-stop");
+        let mut ks = seed(&dir);
+        ks.medium_mut().stop_after(Some(k));
+        let err = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err();
+        assert_eq!(
+            err,
+            Some(Error::Io {
+                op: STEPS[k - 1],
+                kind: std::io::ErrorKind::Interrupted
+            }),
+            "{at}: not the injected error"
+        );
+        drop(ks);
+        assert!(observe(&dir, &at), "{at}: slot 1 was written whole and the plain image was taken");
+        driven += 1;
+    }
+    for (k, creates, stood_len, frame_len) in [(1usize, true, 0usize, lens[0]), (3, false, plain_len, lens[1])] {
+        for (mask, len) in tears(creates, stood_len, frame_len) {
+            let at = format!("migrating tear of call {k}, sectors {mask:#b}, {len:?} bytes");
+            let dir = ScratchDir::new("migrating-walk-tear");
+            let mut ks = seed(&dir);
+            ks.medium_mut().tear_after(
+                Some(k),
+                Box::new(move |stood: Option<&[u8]>, frame: &[u8]| -> Option<Vec<u8>> { torn(stood, frame, mask, len) }),
+            );
+            let err = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err();
+            assert_eq!(
+                err,
+                Some(Error::Io {
+                    op: "write_slot",
+                    kind: std::io::ErrorKind::Interrupted
+                }),
+                "{at}: not the injected error"
+            );
+            drop(ks);
+            // Slot 0 is overwritten only after slot 1 is flushed, so its tear
+            // leaves the new image standing; slot 1's leaves it only when the
+            // tear left the frame itself.
+            let whole = k == 3 || left_the_frame(mask, len, frame_len);
+            assert_eq!(observe(&dir, &at), whole, "{at}: taken as the wrong side of the commit");
+            driven += 1;
+        }
+    }
+    println!("  migrating walk: {driven} interruption point(s), four stops and every tear of two writes");
 }
 
 /// `create` flushes the store directory's parent once before its first
 /// commit, whether it made the directory or found it, then runs the commit's
 /// four steps.
+///
+/// Unix only: the four steps are the rename layout's. The Windows sequence,
+/// the same flush followed by the slot steps, is tested above.
+#[cfg(unix)]
 #[test]
 fn create_flushes_the_store_directory_parent_before_its_first_commit() {
     let made = ScratchDir::new("parent-flush-made");
@@ -1038,6 +1347,7 @@ fn stale_temp_is_unlinked_and_never_adopted() {
     assert_eq!(read_snapshot(&dir), target);
 }
 
+#[cfg(unix)]
 #[test]
 fn temp_file_is_created_mode_0600_and_the_directory_0700() {
     let dir = ScratchDir::new("modes");
@@ -1051,6 +1361,7 @@ fn temp_file_is_created_mode_0600_and_the_directory_0700() {
     assert_eq!(tmode, 0o600, "the temp holds plaintext roots and must not be group/other readable");
 }
 
+#[cfg(unix)]
 #[test]
 fn open_refuses_a_group_writable_directory() {
     let dir = ScratchDir::new("perms");
@@ -1062,6 +1373,144 @@ fn open_refuses_a_group_writable_directory() {
     assert!(Keystore::open(dir.path(), &keystore_harness::unlock()).is_ok());
 }
 
+/// Runs `icacls` on `path` with the given arguments and panics unless it
+/// succeeds.
+///
+/// Trustees are named by SID with `icacls`'s `*` prefix, so the command is
+/// the same in every Windows language. Its output is localized and is not
+/// parsed; the keystore's own check, which is under test, reads the result.
+#[cfg(windows)]
+fn icacls(path: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("cannot run icacls: {e}"));
+    assert!(status.success(), "icacls {} {args:?} failed: {status}", path.display());
+}
+
+/// The Windows form of `open_refuses_a_group_writable_directory`: a store
+/// directory Everyone may modify is refused as `UnsafeAcl` naming Everyone,
+/// and the same directory opens once that entry is removed.
+#[cfg(windows)]
+#[test]
+fn open_refuses_a_directory_everyone_can_write_to() {
+    let dir = ScratchDir::new("acl-everyone");
+    drop(Keystore::create(dir.path(), &keystore_harness::init()).unwrap_or_else(|e| panic!("{e}")));
+    icacls(dir.path(), &["/grant", "*S-1-1-0:(M)"]);
+    match Keystore::open(dir.path(), &keystore_harness::unlock()).err() {
+        Some(Error::UnsafeAcl { trustee, .. }) => assert_eq!(trustee, "S-1-1-0", "the refusal names the wrong trustee"),
+        other => panic!("a directory Everyone may modify was not refused as UnsafeAcl: {other:?}"),
+    }
+    icacls(dir.path(), &["/remove:g", "*S-1-1-0"]);
+    assert!(Keystore::open(dir.path(), &keystore_harness::unlock()).is_ok(), "the directory does not open once the grant is gone");
+}
+
+/// If either slot file or the lock is readable or writable by Everyone,
+/// `open` refuses the store as `UnsafeFileAcl` naming that file and
+/// Everyone, and the store opens once the entry is removed. The directory
+/// grants only the current user, and the refusal still comes: Windows checks
+/// access to a file against the file's own list, which is what `open` reads.
+#[cfg(windows)]
+#[test]
+fn open_refuses_a_store_file_another_user_can_read_or_write() {
+    let dir = ScratchDir::new("acl-file");
+    let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    drop(ks);
+    for name in ["accounts.mks", "accounts.mks.1", "keystore.lock"] {
+        let path = dir.path().join(name);
+        for grant in ["*S-1-1-0:(R)", "*S-1-1-0:(W)"] {
+            icacls(&path, &["/grant", grant]);
+            match keystore_harness::open(dir.path()).err() {
+                Some(Error::UnsafeFileAcl { file, trustee, .. }) => {
+                    assert_eq!(file, name, "{grant} on {name}: the refusal names the wrong file");
+                    assert_eq!(trustee, "S-1-1-0", "{grant} on {name}: the refusal names the wrong trustee");
+                }
+                other => panic!("{grant} on {name} was not refused as UnsafeFileAcl: {other:?}"),
+            }
+            icacls(&path, &["/remove:g", "*S-1-1-0"]);
+            assert!(
+                keystore_harness::open(dir.path()).is_ok(),
+                "the store does not open once {grant} on {name} is gone"
+            );
+        }
+    }
+}
+
+/// A store created inside a directory Everyone may modify inherits nothing
+/// from it: the store directory gets the keystore's protected access list,
+/// and the keystore's own check reads it back.
+///
+/// The parent grants Everyone modify rights, inherited by files and
+/// directories, and the test first asserts that the parent itself is refused.
+/// A store directory created without the protected flag would inherit that
+/// grant and `create` would refuse it, so the store opening shows the flag is
+/// set.
+#[cfg(windows)]
+#[test]
+fn a_store_created_under_a_writable_parent_inherits_nothing_from_it() {
+    let parent = ScratchDir::new("acl-parent");
+    std::fs::create_dir(parent.path()).unwrap_or_else(|e| panic!("{e}"));
+    icacls(parent.path(), &["/grant", "*S-1-1-0:(OI)(CI)(M)"]);
+    assert!(
+        matches!(Keystore::open(parent.path(), &keystore_harness::unlock()).err(), Some(Error::UnsafeAcl { .. })),
+        "premise: the parent Everyone may modify is itself refused"
+    );
+    let store = parent.path().join("store");
+    let mut ks = Keystore::create(&store, &keystore_harness::init())
+        .unwrap_or_else(|e| panic!("the store created under a writable parent is refused, so it inherited: {e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    drop(ks);
+    assert!(Keystore::open(&store, &keystore_harness::unlock()).is_ok(), "the store does not reopen");
+}
+
+/// A slot file that another process holds open without sharing write makes
+/// `open` refuse the store as `HeldOpen` before anything is read, and changes
+/// nothing; the store opens once the holder closes it. While a handle holds
+/// its slots, a program that shares only read cannot open them.
+///
+/// The holder shares read only, as a scanner or indexer might. On Windows
+/// `open` holds both slot files for writing and shares only read, so such a
+/// holder is met at `open`, never at a commit.
+#[cfg(windows)]
+#[test]
+fn a_slot_held_open_without_write_sharing_refuses_the_open_by_name() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let dir = ScratchDir::new("held-slot");
+    let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    drop(ks);
+    let before = dir.slot_bytes();
+    let hold = |name: &str| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(dir.path().join(name))
+    };
+    for name in ["accounts.mks", "accounts.mks.1"] {
+        let holder = hold(name).unwrap_or_else(|e| panic!("cannot hold {name} open: {e}"));
+        let refused = keystore_harness::open(dir.path()).err();
+        drop(holder);
+        assert!(
+            matches!(refused, Some(Error::HeldOpen { .. })),
+            "an open with {name} held was not refused as HeldOpen: {refused:?}"
+        );
+        assert_eq!(dir.slot_bytes(), before, "the open refused over {name} changed a slot");
+    }
+    let ks = keystore_harness::open(dir.path()).unwrap_or_else(|e| panic!("the store does not open once the holder is gone: {e}"));
+    for name in ["accounts.mks", "accounts.mks.1"] {
+        assert!(
+            hold(name).is_err(),
+            "a program sharing read alone opened {name} while a handle holds it for writing"
+        );
+    }
+    drop(ks);
+}
+
+#[cfg(unix)]
 #[test]
 fn poisoned_handle_refuses_to_launder_a_rollback() {
     // advance_to(k+5) fails at the directory fsync (disk = k+5, memory = k).
@@ -1077,6 +1526,36 @@ fn poisoned_handle_refuses_to_launder_a_rollback() {
     ks.medium_mut().stop_after(Some(4));
     let err = ks.persist_advance_to(&IMPORTED_TAG, target).err().unwrap_or_else(|| panic!("expected the injected error"));
     assert_eq!(err, Error::Io { op: "fsync_dir", kind: std::io::ErrorKind::Interrupted });
+    ks.medium_mut().stop_after(None);
+    let later = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err().unwrap_or_else(|| panic!("a poisoned handle wrote"));
+    assert!(matches!(later, Error::Poisoned { .. }), "{later:?}");
+    let msg = later.to_string();
+    assert!(msg.contains("drop this handle and reopen"), "{msg}");
+    assert!(msg.contains("do not retry"), "{msg}");
+    drop(ks);
+    let ks = Keystore::open(dir.path(), &keystore_harness::unlock()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        ks.view(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("missing")).wots_index,
+        target,
+        "disk's committed k+5 was overwritten"
+    );
+}
+
+/// The Windows form of the test above, with the injected failure at the
+/// commit's last step on Windows, the flush of the slot just written.
+#[cfg(windows)]
+#[test]
+fn poisoned_handle_refuses_to_launder_a_rollback() {
+    let dir = ScratchDir::new("poison");
+    let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init()).unwrap_or_else(|e| panic!("{e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    let mut target = WotsIndex::ZERO;
+    for _ in 0..5 {
+        target = target.advanced().unwrap_or_else(|e| panic!("{e}"));
+    }
+    ks.medium_mut().stop_after(Some(2));
+    let err = ks.persist_advance_to(&IMPORTED_TAG, target).err().unwrap_or_else(|| panic!("expected the injected error"));
+    assert_eq!(err, Error::Io { op: "flush_slot", kind: std::io::ErrorKind::Interrupted });
     ks.medium_mut().stop_after(None);
     let later = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err().unwrap_or_else(|| panic!("a poisoned handle wrote"));
     assert!(matches!(later, Error::Poisoned { .. }), "{later:?}");
@@ -1198,6 +1677,12 @@ fn snapshot_bytes_never_contain_the_imported_root() {
         bytes.windows(ROOT.len()).all(|w| w != ROOT),
         "the imported root's 32 bytes appear somewhere in the snapshot. The whole point of \
          version 3 is that they do not."
+    );
+    // A Windows store is two slot files, and the older image is at rest too.
+    #[cfg(windows)]
+    assert!(
+        dir.slot_bytes().windows(ROOT.len()).all(|w| w != ROOT),
+        "the imported root's 32 bytes appear somewhere in the slot files"
     );
 
     // 2. Restored after a reopen.
@@ -1330,7 +1815,25 @@ fn a_lock_file_with_no_snapshot_is_inert_and_only_a_live_holder_refuses_create()
     });
 
     // 5.
+    #[cfg(unix)]
     std::fs::remove_file(dir.path().join("accounts.mks")).unwrap_or_else(|e| panic!("{e}"));
+    // On Windows a live handle holds its slot files without sharing delete,
+    // so no snapshot can be removed while it is open. Here the live holder is
+    // the lock alone, with no store beside it.
+    #[cfg(windows)]
+    let held = {
+        drop(held);
+        for name in ["accounts.mks", "accounts.mks.1"] {
+            std::fs::remove_file(dir.path().join(name)).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.path().join("keystore.lock"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        lock.try_lock().unwrap_or_else(|e| panic!("{e}"));
+        lock
+    };
     assert_eq!(
         Keystore::create(dir.path(), &keystore_harness::init()).err(),
         Some(Error::Locked),
@@ -1656,6 +2159,7 @@ fn open_refuses_a_header_whose_kdf_costs_exceed_the_ceilings() {
 /// mode to the snapshot. A mode given at open applies only to a newly
 /// created file, so the temp is unlinked before it is created. The mode is
 /// read back from disk after the commit.
+#[cfg(unix)]
 #[test]
 fn a_stale_temp_with_loose_permissions_does_not_reach_the_snapshot() {
     let dir = ScratchDir::new("stale-temp-mode");
@@ -1900,6 +2404,68 @@ fn unix_store_lock_and_snapshot_symbolic_links_are_refused() {
         std::fs::rename(&outside, &entry).unwrap();
     }
     drop(Keystore::open(&path, &keystore_harness::unlock()).unwrap());
+}
+
+/// The Windows form of the test above. A junction needs no privilege, so the
+/// store directory arms always run; a file symbolic link needs one, so the
+/// entry arms run only where this account may create one.
+#[cfg(windows)]
+#[test]
+fn windows_store_junctions_and_entry_links_are_refused() {
+    let root = ScratchDir::new("store-junctions");
+    std::fs::create_dir(root.path()).unwrap();
+    let path = root.path().join("store");
+    drop(Keystore::create(&path, &keystore_harness::init()).unwrap());
+    // `mklink` takes backslashes only, and `CARGO_TARGET_TMPDIR` may hold
+    // forward ones.
+    let native = |p: &std::path::Path| p.to_string_lossy().replace('/', "\\");
+    let junction = |link: &std::path::Path, target: &std::path::Path| {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(native(link))
+            .arg(native(target))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap_or_else(|e| panic!("mklink: {e}"));
+        assert!(status.success(), "mklink /J {} failed", link.display());
+    };
+    let alias = root.path().join("alias");
+    junction(&alias, &path);
+    for spelling in [alias.clone(), alias.join("."), alias.join("")] {
+        assert_eq!(Keystore::open(&spelling, &keystore_harness::unlock()).err(), Some(Error::StoreDirectoryIsLink));
+        assert_eq!(Keystore::create(&spelling, &keystore_harness::init()).err(), Some(Error::StoreDirectoryIsLink));
+    }
+    let empty = root.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    for (name, target) in [("to-empty", empty.clone()), ("dangling", root.path().join("absent"))] {
+        let link = root.path().join(name);
+        junction(&link, &target);
+        assert_eq!(Keystore::create(&link, &keystore_harness::init()).err(), Some(Error::StoreDirectoryIsLink));
+    }
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0, "a store was created through a junction");
+    assert!(!root.path().join("absent").exists(), "a store was created through a dangling junction");
+    drop(Keystore::open(&path, &keystore_harness::unlock()).unwrap());
+
+    let mut linked = 0;
+    for name in ["keystore.lock", "accounts.mks", "accounts.mks.1"] {
+        let entry = path.join(name);
+        let outside = root.path().join(name);
+        std::fs::rename(&entry, &outside).unwrap();
+        let before = std::fs::read(&outside).unwrap();
+        match std::os::windows::fs::symlink_file(&outside, &entry) {
+            Ok(()) => {
+                linked += 1;
+                assert!(Keystore::open(&path, &keystore_harness::unlock()).is_err(), "{name} was opened through a link");
+                assert_eq!(std::fs::read(&outside).unwrap(), before, "{name} changed through a link");
+                std::fs::remove_file(&entry).unwrap();
+            }
+            Err(e) if e.raw_os_error() == Some(1314) => {}
+            Err(e) => panic!("symlink_file {name}: {e}"),
+        }
+        std::fs::rename(&outside, &entry).unwrap();
+    }
+    drop(Keystore::open(&path, &keystore_harness::unlock()).unwrap());
+    println!("  windows links: junctions refused at the store's name; {linked} of 3 entry links created and refused");
 }
 
 #[cfg(unix)]

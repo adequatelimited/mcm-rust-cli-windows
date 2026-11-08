@@ -1,6 +1,6 @@
 # Tawara
 
-A command-line Rust wallet for **Mochimo**, by Adequate Systems HK Limited.
+A command-line Rust wallet for **Mochimo**.
 
 It manages an encrypted local keystore, derives **WOTS+ one-time** signing keys, builds and submits spends through the public Mesh API, and refuses to act on any account whose local key state and the chain disagree. That refusal is intentional: accounts that reconcile keep working, and only a store in which *nothing* reconciled refuses to start.
 
@@ -34,9 +34,9 @@ It is also why an account **fails closed** when its stored index and the Mesh di
 
 ## Requirements
 
-- **Unix only** — built and tested on **Linux** and **macOS**. Not Windows, and not WSL's Windows side: the keystore's permission checks are Unix mode bits and secrets are read from `/dev/tty`. The BSDs have the interfaces it needs and are untested here.
+- **Linux, macOS and Windows** — built and tested on **Linux** and **macOS**. On Windows the library's and the command layer's test suites pass, and the program has been run interactively at a Windows 11 console on x86-64: its prompts, `Ctrl-Z`, passwords with non-ASCII characters set on macOS, and a connection to a node all worked. No automated test runs the program on Windows, and that run was elevated, so the permission checks under an ordinary account are untested. On Windows the keystore's permission checks are access lists rather than mode bits, secrets are read from the console rather than `/dev/tty`, and a store is two files rewritten in place rather than one file replaced by a rename — see *Limits*. The BSDs have the Unix interfaces and are untested.
 - Rust **1.89+** (see root `Cargo.toml`)
-- A normal controlling terminal — the password and the recovery phrase are read from `/dev/tty`, never from a pipe or a redirect
+- A normal controlling terminal — the password and the recovery phrase are read from `/dev/tty` (on Windows, the console the program runs in), never from a pipe or a redirect
 - Network access for any command that talks to a Mesh node
 
 On some machines Cargo is not on the default `PATH`:
@@ -161,6 +161,12 @@ tawara ... send <tag> <to> all
 - Default **`0`**: never expires (nodes keep it until it lands, subject to their own rules).
 - Non-zero `N`: the spend must land by block `N`. Before reserving, the wallet requires a readable tip, `N` later than that tip, and `N` at most 256 blocks ahead. An invalid window or failed tip read leaves the key unused. Expiry before inclusion can still permanently lock funds; the default `0` avoids this expiry risk.
 - `--btl` is **signed into the artifact**. If you need `resign` later, you must pass the **same** `--btl` (and the same destination, amount, fee and `--ref`).
+
+### Expected balance (`--expect-balance`)
+
+- `send`, `set-delegate`, `clear-delegate` and `claim` take `--expect-balance N`. The wallet then refuses to reserve a key unless the node reports exactly `N` as the source's spendable balance. Read `N` from a source other than `--node`.
+- Without it, the change is computed from the configured node's figure. A false figure is found only after the key has signed, when the node rejects the totals.
+- `resign` and `--resign` do not take it: the reserved transaction already fixes the balance, so do not repeat it there.
 
 ### What `settle` is (and is not)
 
@@ -343,9 +349,11 @@ Known limits of this binary:
 - **Accounts past 0 enter the store only once funded** — `create` makes account 0; `address --account N` prints account N's destination without storing it; fund that destination, then `restore --account N` adds the account. An unfunded account cannot be stored, because the Mesh cannot tell never-funded from emptied. `discover` will tell you which indices the node *does* resolve, without storing anything — but it cannot tell you that an index has no account, for the same reason.
 - **History comes from the Mesh's indexer, and not every deployment runs one** — `transaction` and `recent-transactions` read `/search/transactions`, which a node serves only if it was configured to index. Where it was not, the node does not serve the endpoint at all and answers HTTP 404; where it was and its indexer's database is not connected, it answers code 2, its internal error. Those two verbs report either rather than an empty list, and say which; `block` and `blocks` do not depend on it. History is also rendered *gross* there — a spend's source shows its whole balance leaving and the change coming back as a separate credit — while `block` shows the same spend *net*. Both are correct; each page says which it is showing.
 - **An emptied account needs an incoming payment to come back** — the Mesh will not show a tag it holds at zero balance, so that account is refused until someone pays it. Another account in the same store can, which is why only that account is refused. If it is the **only** account in the store, the wallet does not start and the payment has to come from outside. Nothing local fixes it: querying the full 40-byte address instead of the tag does not get around the quorum's zero-discard.
-- **Dead reservation** — if the balance changes after signing, the node supplied a false balance, or `--btl` expires, the signed bytes may never be accepted and funds can be permanently locked. Clearing the reservation, restoring an old snapshot, or signing a replacement would risk reusing a one-time key. The wallet retains the reservation and explains its state; it has no safe local repair for this protocol limit.
+- **Dead reservation** — if the balance changes after signing, the node supplied a false balance, or `--btl` expires, the signed bytes may never be accepted and funds can be permanently locked. `--expect-balance` refuses a false balance before signing, when you read the figure from another source. Clearing the reservation, restoring an old snapshot, or signing a replacement would risk reusing a one-time key. The wallet retains the reservation and explains its state; it has no safe local repair for this protocol limit.
 - **Seed derivation** — several schemes exist across Mochimo clients and they do not agree. This wallet matches the **browser extension** scheme (fixture group F). A phrase from another scheme is not refused: it derives a working store whose accounts are empty, which looks exactly like a wallet nobody has paid. `create --from-phrase` says so before it reads anything, and nothing detects the case afterwards, so an empty balance on a phrase from elsewhere is not evidence the funds are gone.
-- **Password prompt** — needs a real terminal; cannot be driven from a plain pipe.
+- **Password prompt** — needs a real terminal; cannot be driven from a plain pipe. On Windows that is a console: Windows Terminal, the classic console window, or an editor's terminal that hosts one. A terminal that is not a console — `mintty` without `winpty` — is not known to work; through `winpty` it has worked.
+- **On Windows a store is two files, and it moves one way** — `accounts.mks` and `accounts.mks.1`. Every change is written into the one that does not hold the newest state and flushed to the disk before the wallet treats it as done, so a power cut or a system crash cannot bring back a state older than the last change the wallet reported — on a disk that honours the flush, as on Linux and macOS. Keep both files together and delete neither: the wallet refuses a store missing its second file rather than guess what it held. A store copied from Linux or macOS opens on Windows and is converted by its first change there; a store copied from Windows is refused on Linux and macOS, and nothing here converts one back.
+- **On Windows, another program can hold the store open** — an antivirus scanner, a search indexer, or a backup or sync agent. When one holds a store file without letting others write to it, the wallet refuses to open the store and nothing is read or changed; the error says so. Run the command again, and if the refusal persists, exclude the keystore directory from that program. While the wallet has a store open, no other program can change or delete its files.
 - **Memory is not locked and core dumps are not suppressed** — the master seed, the decrypted store, the password and the expanded signing keys sit in ordinary pageable memory while in use. Each is overwritten on drop, and that is the whole of it: a page already written to swap, a core dump, a hibernation image or an attached debugger are outside what this program addresses. Swap encryption and a core-dump limit are the platform's tools, set outside this process.
 - **Interrupting a long scan skips that overwrite** — `restore` and `status` walk key positions with the master seed in memory, up to 10,000 of them, and the overwrite above happens when the seed is dropped. `Ctrl-C` does not drop anything: this program installs no signal handler, so the default disposition ends the process with the seed still in its pages. The library accepts a cancellation predicate (`recon::Cancel`) that lets a caller stop a walk and return normally, but this binary does not use one. Let a long scan finish where you can.
 
@@ -398,7 +406,7 @@ Features of note:
 
 ## License
 
-Copyright © Adequate Systems HK Limited. All rights reserved except as granted by the license below.
+Copyright Adequate Systems HK Limited.
 
 This project is licensed under the **Mochimo Cryptocurrency Engine License Agreement, version 1.0**. The full text is in [`LICENSE.md`](LICENSE.md).
 

@@ -59,18 +59,112 @@ impl ScratchDir {
         out
     }
 
+    #[cfg(unix)]
     pub fn snapshot_bytes(&self) -> Vec<u8> {
         std::fs::read(self.path.join("accounts.mks"))
             .unwrap_or_else(|e| panic!("read snapshot in {}: {e}", self.path.display()))
+    }
+
+    /// The image the store opens to. On Windows a store is two slot files,
+    /// and tests compare, parse or damage the image `open` takes from them,
+    /// not either file whole. Reads under [`TEST_PASSWORD`], the password
+    /// every harness-built store is sealed under.
+    #[cfg(windows)]
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        self.snapshot_bytes_under(TEST_PASSWORD)
+    }
+
+    /// [`Self::snapshot_bytes`] for a store sealed under `password`. A Unix
+    /// snapshot is read without the password.
+    #[cfg(unix)]
+    pub fn snapshot_bytes_under(&self, _password: &[u8]) -> Vec<u8> {
+        self.snapshot_bytes()
+    }
+
+    /// [`Self::snapshot_bytes`] for a store sealed under `password`.
+    ///
+    /// When only one slot can hold the image (no slot 1, which is the rename
+    /// layout, or one intact frame beside a slot that holds none), that image
+    /// is read here without the key. It takes a frame's image by its length
+    /// alone and leaves validation to the keystore. Ordering two images needs
+    /// the key, because the generation is inside the ciphertext, so that case
+    /// calls `keystore::newest_image` under `password`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a slot file cannot be read, if `accounts.mks` is missing, or
+    /// if `newest_image` refuses the store (for example, under the wrong
+    /// password).
+    #[cfg(windows)]
+    pub fn snapshot_bytes_under(&self, password: &[u8]) -> Vec<u8> {
+        const MAGIC: &[u8] = b"MCMKSLOT";
+        let read = |name: &str| match std::fs::read(self.path.join(name)) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => panic!("read {name} in {}: {e}", self.path.display()),
+        };
+        let slot0 = read("accounts.mks").unwrap_or_else(|| panic!("no accounts.mks in {}", self.path.display()));
+        let Some(slot1) = read("accounts.mks.1") else {
+            return slot0;
+        };
+        let image = |frame: &[u8]| -> Option<Vec<u8>> {
+            if frame.get(..MAGIC.len()) != Some(MAGIC) {
+                return None;
+            }
+            let len = usize::try_from(u32::from_le_bytes(frame.get(10..14)?.try_into().ok()?)).ok()?;
+            (len > 0 && frame.len() == 46 + len).then(|| frame[14..14 + len].to_vec())
+        };
+        let plain0 = !slot0.starts_with(MAGIC);
+        match (image(&slot0), plain0, image(&slot1)) {
+            (Some(only), _, None) | (None, false, Some(only)) => only,
+            (None, true, None) => slot0,
+            _ => mochimo_crypto::keystore::newest_image(&self.path, password)
+                .map(|image| image.to_vec())
+                .unwrap_or_else(|e| panic!("order the two slots in {}: {e}", self.path.display())),
+        }
     }
 
     /// Overwrites the snapshot, for tests that damage the file on purpose.
     ///
     /// Writes directly rather than through `Medium`, so it can produce a file
     /// the keystore never would.
+    #[cfg(unix)]
     pub fn write_snapshot(&self, bytes: &[u8]) {
         std::fs::write(self.path.join("accounts.mks"), bytes)
             .unwrap_or_else(|e| panic!("write snapshot in {}: {e}", self.path.display()));
+    }
+
+    /// Overwrites the snapshot, for tests that damage the file on purpose.
+    ///
+    /// On Windows this leaves a store in the rename layout holding exactly
+    /// `bytes` as its snapshot, with slot 1 removed. A Windows build reads
+    /// that layout the same way a Unix build reads a snapshot, so each
+    /// damaged image meets the same refusal on both.
+    #[cfg(windows)]
+    pub fn write_snapshot(&self, bytes: &[u8]) {
+        match std::fs::remove_file(self.path.join("accounts.mks.1")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("remove slot 1 in {}: {e}", self.path.display()),
+        }
+        std::fs::write(self.path.join("accounts.mks"), bytes)
+            .unwrap_or_else(|e| panic!("write snapshot in {}: {e}", self.path.display()));
+    }
+
+    /// Every byte of both slot files, slot 0 then slot 1 (empty when absent).
+    /// This is the strictest comparison a Windows test can make, since it
+    /// detects a write that the newest image would not show.
+    #[cfg(windows)]
+    pub fn slot_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for name in ["accounts.mks", "accounts.mks.1"] {
+            match std::fs::read(self.path.join(name)) {
+                Ok(bytes) => out.extend_from_slice(&bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("read {name} in {}: {e}", self.path.display()),
+            }
+        }
+        out
     }
 }
 

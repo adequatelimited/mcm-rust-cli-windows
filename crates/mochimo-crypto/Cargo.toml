@@ -109,6 +109,62 @@ aes-gcm = { version = "0.10", default-features = false, features = ["aes", "allo
 cbc = { version = "0.1", default-features = false, features = ["alloc", "block-padding"], optional = true }
 base64 = { version = "0.22", default-features = false, features = ["alloc"], optional = true }
 
+# Windows-only dependency. A target-specific dependency is not in the graph of
+# any Unix build, so Linux and macOS builds are unaffected.
+#
+# `windows-sys` provides raw declarations generated from Microsoft's metadata,
+# with no wrapper layer. The call sites are few, and each file that uses them
+# states why `std` cannot do the same. The higher-level `windows` crate is not
+# used because it adds COM support and a second crate family for calls that are
+# plain C functions.
+#
+# Version 0.61 is already in `Cargo.lock` (through `trybuild`'s `termcolor` and
+# `winapi-util`), so this dependency adds no crate to the lockfile and no
+# licence to the `deny.toml` check (MIT OR Apache-2.0). It does add 0.61 and
+# `windows-link` to every Windows wallet build. On aarch64 Windows, `ring` also
+# uses 0.52, so that binary links both versions.
+#
+# Features, one per imported module:
+#
+# * `Win32_Foundation`: the two error codes `keystore::medium` handles when a
+#   replacing move is refused because the file is held open, taken from the
+#   generated constants rather than retyped; and the handle type, `LocalFree`
+#   and the generic access rights used by the permission model.
+# * `Win32_Security`, `Win32_Security_Authorization`: the permission model.
+#   The process token's user, a directory's owner and access list, the SID
+#   strings used to compare them, and the security descriptor a file is
+#   created with. `std` cannot read a security descriptor or create a file with
+#   one, so `keystore::perms` has a Windows implementation.
+# * `Win32_Storage_FileSystem`: `CreateFileW` and `CreateDirectoryW`, which
+#   apply that descriptor at creation, and the file and directory rights the
+#   access-list check treats as write access.
+# * `Win32_System_SystemServices`: the access-control entry type codes the
+#   check dispatches on.
+# * `Win32_System_Threading`: `OpenProcessToken` and `GetCurrentProcess`, to
+#   identify the process owner.
+# * `Win32_System_Console`: the binary's console. The console mode that turns
+#   echo off, and the wide-character read and write, which keep a password's
+#   bytes as UTF-8 on every platform instead of the console's code page.
+# * `Win32_Security_Cryptography`: `BCryptGenRandom`, the binary's entropy
+#   source in place of `/dev/urandom`. `ring`'s generator is in the binary's
+#   graph under `mesh-https` but is not used: as with `os_bytes` on Unix, the
+#   entropy comes directly from the operating system.
+#
+# The two binary-only features are listed here because a `[[bin]]` has no
+# dependency table of its own. The library does not import either module, and
+# `tests/invariants.rs` lists every file allowed to import `windows_sys`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
 # The command-line wallet. Requires `mesh-https` (rustls and `ring`), so no
 # test target links it. The command layer is tested in `tests/cli.rs`
 # against a fake transport; that file's pty harness also builds this binary
