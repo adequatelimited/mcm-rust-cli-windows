@@ -1,0 +1,19 @@
+# Pinned because `tests/compile_fail.rs` (trybuild) checks rustc's exact
+# diagnostic wording in `.stderr` files generated on rustc 1.98.0; another
+# compiler version can fail them without any change in behaviour.
+#
+# clippy is listed because the minimal rustup profile omits it. rustdoc ships
+# inside the `rustc` component.
+#
+# An explicit `+toolchain` (for example `cargo +nightly miri test`) overrides
+# this file.
+#
+# The workspace's minimum supported version is 1.89 (`rust-version`). Check it
+# separately with:
+#
+#   cargo +1.89.0 check --workspace
+#   cargo +1.89.0 check -p mochimo-crypto --features mesh-https
+
+[toolchain]
+channel = "1.98.0"
+components = ["clippy"]

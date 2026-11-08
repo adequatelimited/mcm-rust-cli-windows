@@ -1,0 +1,27 @@
+warning: unreachable expression
+  --> ui/fail/account_literal_is_not_constructible.rs:17:14
+   |
+16 |         tag: todo!(),
+   |              ------- any code following this expression is unreachable
+17 |         key: todo!(),
+   |              ^^^^^^^ unreachable expression
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: fields `tag`, `key` and `wots_index` of struct `Account` are private
+  --> ui/fail/account_literal_is_not_constructible.rs:16:9
+   |
+15 |     let _ = mochimo_crypto::account::Account {
+   |             -------------------------------- in this type
+16 |         tag: todo!(),
+   |         ^^^ private field
+17 |         key: todo!(),
+   |         ^^^ private field
+18 |         wots_index: todo!(),
+   |         ^^^^^^^^^^ private field
+
+error: type `account::KeyMaterial` is private
+  --> ui/fail/account_literal_is_not_constructible.rs:17:14
+   |
+17 |         key: todo!(),
+   |              ^^^^^^^ private type

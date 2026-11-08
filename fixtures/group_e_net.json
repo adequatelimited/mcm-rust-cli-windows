@@ -1,0 +1,195 @@
+{
+  "group": "E",
+  "pins": "protocol-survey.md §4/§5 -- packet framing constants and CRC16 (partial: see the gaps object)",
+  "generator": "reference/gen-fixtures",
+  "rule": "Every value below was returned by a function in reference/. Nothing here is hand-computed. Regenerate rather than edit.",
+  "reference": {
+    "mochimo_core": "bbbaceabe5c21b5d8a094cf34c050d28e4ae93f4",
+    "crypto_c": "6e3e59b70e5db6ddfe6979d0dc27705e23a243c1",
+    "extended_c": "a9a6498d043d3714140dc6adf83fba9c572a43cb",
+    "mochimo_wots_ts": "b583580bffcbe51dbcfd4e30aa711d0d2703b851"
+  },
+  "constants": {
+    "note": "Values of the reference macros as the compiler sees them. Fixture-plan E4.",
+    "PVERSION": 5,
+    "CBITS": 0,
+    "PORT1": 2095,
+    "PORT2": 2096,
+    "TXEOT": 43981,
+    "TXNETWORK": 1337,
+    "WORD16_MAX": 65535,
+    "CRC16LEN": 2,
+    "sizeof_TX": 65664,
+    "TXLEN_MIN": 2368,
+    "TXLEN_DSK_MIN": 2408,
+    "opcodes": {
+      "OP_NULL": 0,
+      "OP_HELLO": 1,
+      "OP_HELLO_ACK": 2,
+      "FIRST_OP": 3,
+      "OP_TX": 3,
+      "OP_FOUND": 4,
+      "OP_GET_BLOCK": 5,
+      "OP_GET_IPL": 6,
+      "OP_SEND_FILE": 7,
+      "OP_SEND_IPL": 8,
+      "OP_BUSY": 9,
+      "OP_NACK": 10,
+      "OP_GET_TFILE": 11,
+      "OP_BALANCE": 12,
+      "OP_SEND_BAL": 13,
+      "OP_RESOLVE": 14,
+      "OP_GET_CBLOCK": 15,
+      "OP_MBLOCK": 16,
+      "OP_HASH": 17,
+      "OP_TF": 18,
+      "OP_IDENTIFY": 19,
+      "LAST_OP": 19,
+      "valid_op_rule": "network.c:34 -- valid_op(op) is FIRST_OP <= op <= LAST_OP"
+    }
+  },
+  "packet_layout": {
+    "note": "offsetof() over the TX struct at reference/mochimo-core/src/types.h:606. These are the compiler's numbers, not arithmetic done here.",
+    "source": "TX() @ reference/mochimo-core/src/types.h:606",
+    "off_version": 0,
+    "off_network": 2,
+    "off_id1": 4,
+    "off_id2": 6,
+    "off_opcode": 8,
+    "off_cblock": 10,
+    "off_blocknum": 18,
+    "off_cblockhash": 26,
+    "off_pblockhash": 58,
+    "off_weight": 90,
+    "off_len": 122,
+    "off_buffer": 124,
+    "off___align_crc16": 65659,
+    "off_crc16": 65660,
+    "off_trailer": 65662,
+    "sizeof_TX": 65664,
+    "TXHDRLEN_literal_in_network_c": 124,
+    "TXHDRLEN_from_offsetof_buffer": 124,
+    "TXHDRLEN_agrees": true,
+    "TXTLRLEN_literal_in_network_c": 4,
+    "framing_length_caveat": "TXHDRLEN (124) and TXTLRLEN (4) are #defines local to reference/mochimo-core/src/network.c:38-39. They appear in no header, so a port cannot import them; derive the header length from offsetof(TX, buffer) instead, and check it against 124 as this vector does.",
+    "on_wire_length_formula": "quoted from network.c:301 -- len = TXHDRLEN + get16(tx->len) + TXTLRLEN. Note this is far smaller than sizeof(TX): the buffer is declared WORD16_MAX bytes but only get16(tx->len) of them are transmitted.",
+    "crc16_range_formula": "quoted from network.c:293 -- put16(tx->crc16, crc16(tx, TXHDRLEN + get16(tx->len))). The CRC covers the fixed header plus the used prefix of buffer, and excludes crc16 and trailer. The receive side checks the identical range at network.c:172 as len - TXTLRLEN.",
+    "crc16_placement": "quoted from network.c:295 -- memmove(tx->buffer + get16(tx->len), tx->crc16, 4). The 4 CRC+trailer bytes are moved to sit immediately after the used prefix of buffer, NOT at offsetof(TX, crc16). Receive reverses it at network.c:169. A port that lays the packet out by struct offset will produce a packet the network rejects."
+  },
+  "vectors": [
+    {
+      "id": "E5",
+      "note": "the network and trailer fields written by the reference's own put16(). The cheapest possible little-endian regression test: a port that stores these big-endian produces 05 39 / ab cd and every packet it sends is dropped before any signature is examined.",
+      "falsifies": "survey §4: multi-byte packet fields are little-endian",
+      "source": "put16() @ reference/mochimo-core/include/extended-c/src/extlib.h:71",
+      "TXNETWORK": 1337,
+      "network_bytes": "3905",
+      "TXEOT": 43981,
+      "trailer_bytes": "cdab"
+    },
+    {
+      "id": "E5b",
+      "note": "put16/get16 round trip over the 16-bit fields used throughout the packet header.",
+      "falsifies": "survey §4: get16/put16 are the little-endian 16-bit accessors",
+      "source": "put16/get16() @ reference/mochimo-core/include/extended-c/src/extlib.h:71",
+      "pversion_bytes": "0500",
+      "pversion_roundtrip": 5,
+      "port1_bytes": "2f08",
+      "port2_bytes": "3008",
+      "op_tx_bytes": "0300"
+    },
+    {
+      "id": "E2-check",
+      "note": "the CRC-16/XMODEM published check value: crc16 of the ASCII string \"123456789\". crc16.h:8 documents this as 0x31c3. If this vector does not read 12739 (0x31c3), the parameters in that comment block -- poly 0x1021, init 0x0000, no reflection, xorout 0x0000 -- do not describe the code, and every other CRC assumption in this port is unfounded.",
+      "falsifies": "survey §8: CRC16 parameters are unverified",
+      "source": "crc16() @ reference/mochimo-core/include/crypto-c/src/crc16.c",
+      "in": "313233343536373839",
+      "in_len": 9,
+      "crc16": 12739
+    },
+    {
+      "id": "E2-empty",
+      "note": "crc16 of zero bytes. Pins the init value in isolation.",
+      "falsifies": "survey §8: CRC16 init is 0x0000",
+      "source": "crc16() @ reference/mochimo-core/include/crypto-c/src/crc16.c",
+      "in": "",
+      "in_len": 0,
+      "crc16": 0
+    },
+    {
+      "id": "E2-one-zero",
+      "note": "crc16 of a single 0x00 byte. With E2-empty, distinguishes an init-only implementation from one that actually clocks the byte through.",
+      "falsifies": "survey §8: CRC16 parameters",
+      "source": "crc16() @ reference/mochimo-core/include/crypto-c/src/crc16.c",
+      "in": "00",
+      "in_len": 1,
+      "crc16": 0
+    },
+    {
+      "id": "E2-one-ff",
+      "note": "crc16 of a single 0xff byte.",
+      "falsifies": "survey §8: CRC16 parameters",
+      "source": "crc16() @ reference/mochimo-core/include/crypto-c/src/crc16.c",
+      "in": "ff",
+      "in_len": 1,
+      "crc16": 7920
+    },
+    {
+      "id": "E2-zero32",
+      "note": "crc16 of 32 zero bytes -- the value most likely to be produced by an uninitialised port.",
+      "falsifies": "survey §8: CRC16 parameters",
+      "source": "crc16() @ reference/mochimo-core/include/crypto-c/src/crc16.c",
+      "in": "0000000000000000000000000000000000000000000000000000000000000000",
+      "in_len": 32,
+      "crc16": 0
+    },
+    {
+      "id": "E2-ff32",
+      "note": "crc16 of 32 x 0xff.",
+      "falsifies": "survey §8: CRC16 parameters",
+      "source": "crc16() @ reference/mochimo-core/include/crypto-c/src/crc16.c",
+      "in": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "in_len": 32,
+      "crc16": 33972
+    },
+    {
+      "id": "E2-asc32",
+      "note": "crc16 of 00 01 02 ... 1f. A non-symmetric input, so a byte-order error in the port cannot cancel out.",
+      "falsifies": "survey §8: CRC16 parameters",
+      "source": "crc16() @ reference/mochimo-core/include/crypto-c/src/crc16.c",
+      "in": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "in_len": 32,
+      "crc16": 54015
+    },
+    {
+      "id": "E2-len64",
+      "note": "crc16 over 64 bytes of buf[i] = i*7+1 (mod 256). Length is the point here: a table-driven port with an off-by-one in its loop bound passes the short vectors and fails this one.",
+      "falsifies": "survey §8: CRC16 parameters",
+      "source": "crc16() @ reference/mochimo-core/include/crypto-c/src/crc16.c",
+      "in": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3ba",
+      "in_len": 64,
+      "crc16": 36422
+    }
+  ],
+  "gaps": {
+    "rule": "gen-fixtures calls the reference; it never reimplements it. The entries below have no callable entry point, so they are reported rather than hand-assembled.",
+    "E1": {
+      "wanted": "a fully-built OP_TX packet, full bytes",
+      "blocker": "send_tx(NODE *np, double timeout) at reference/mochimo-core/src/network.c:267 is the only code that frames a packet. It sets version/network/trailer/id/cblock, computes the CRC, memmoves the CRC into place, and then calls send() on np->sd -- all in one function body, with no separable framing helper. Producing the bytes requires a socket, which is neither offline nor deterministic. Several fields it writes (Cblocknum, Cblockhash, Prevhash, Weight) are node globals holding chain state, not protocol constants, so even a captured packet would not be reproducible.",
+      "what_is_pinned_instead": "packet_layout above gives every field offset and quotes the three framing lines verbatim with file:line, so a port can be written against them and then validated against a live node."
+    },
+    "E3": {
+      "wanted": "packets with len = 0, 1 and max",
+      "blocker": "same as E1 -- framing lives inside send_tx()."
+    },
+    "E6": {
+      "wanted": "negative verdicts for wrong network, wrong trailer, bad CRC",
+      "blocker": "the three rejection tests are at network.c:172, :179 and :186, inside recv_tx(NODE *np, double timeout) at network.c:128. recv_tx() calls recv() on np->sd before reaching any of them, so the verdicts cannot be obtained without a socket. The tests themselves are simple enough to quote: get16(tx->crc16) != crc16(tx, len - TXTLRLEN), get16(tx->network) != TXNETWORK, get16(tx->trailer) != TXEOT, each returning VEBAD."
+    },
+    "live_node_roundtrip": "out of scope for an offline generator, and the only thing that can actually confirm E1/E3/E6. This is the point at which the port needs a testnet peer."
+  },
+  "notes": {
+    "network_c_174_debug_format_defect": "network.c:172 checks crc16(tx, len - TXTLRLEN), which equals TXHDRLEN + get16(tx->len). The pdebug() on the failure path at network.c:174 recomputes it as crc16(tx, TXHDRLEN + len), which double-counts the header and trailer. Only the log line is affected -- the check itself is correct -- but a port that copies the range from the error message rather than from the comparison will be wrong.",
+    "align_crc16_field": "TX carries a one-byte __align_crc16 field marked UNUSED at types.h:619. It exists to 4-byte-align the crc16/trailer pair inside the struct. It is never transmitted, because the CRC and trailer are memmoved to buffer + get16(tx->len) before sending."
+  }
+}

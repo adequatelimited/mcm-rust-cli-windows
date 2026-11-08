@@ -1,0 +1,5 @@
+error[E0063]: missing fields `first_key` and `stream_id` in initializer of `AccountRecord`
+  --> ui/fail/account_record_imported_requires_its_new_fields.rs:20:13
+   |
+20 |     let _ = AccountRecord::Imported {
+   |             ^^^^^^^^^^^^^^^^^^^^^^^ missing `first_key` and `stream_id`

@@ -1,0 +1,13 @@
+error[E0603]: module `internals` is private
+  --> ui/fail/signing_internals_are_not_reachable.rs:11:35
+   |
+11 |     let _ = mochimo_crypto::wots::internals::expand_seed(&secret);
+   |                                   ^^^^^^^^^  ----------- function `expand_seed` is not publicly re-exported
+   |                                   |
+   |                                   private module
+   |
+note: the module `internals` is defined here
+  --> src/wots.rs
+   |
+   | pub(crate) mod internals {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,540 @@
+# Coverage manifest for the fixture corpus.
+#
+# tests/kat.rs asserts this file and the directory agree in BOTH directions:
+# every *.json on disk appears here, and every entry here exists on disk. A
+# disagreement fails the suite. That is what stops a KAT run from passing by
+# iterating nothing.
+#
+# `vectors` and `sources` are asserted against what the harness actually finds,
+# so a count that disagrees with the directory cannot pass unnoticed either.
+#
+# THE CORPUS IS FROZEN. It is replayed, never regenerated: nothing in this
+# repository produces a vector, and no vector here is downstream of anything
+# that can be re-run. A vector that looks wrong is a finding about this crate,
+# or about the reading of the reference behind it, and is answered in the code
+# or in the specification -- never by moving the vector.
+#
+# THIS FILE'S PROSE IS THE ONE EXCEPTION. The standing rule is stated as
+# "nothing under fixtures/", which is broader than what it protects. The
+# protected class is generated oracle data -- vectors, sidecars, hashes,
+# expected values, counts, file lists -- immutable because editing it is how a
+# wrong implementation certifies itself. The `reason` blocks are
+# hand-maintained prose about that data, and are the intended place for a
+# finding whoever reads a group must meet. What is NOT editable, here or
+# anywhere under fixtures/: the per-group `vectors`/`sources` counts, the file
+# lists, `total_vectors`, `reference_pin`, and every value in every *.json.
+# Those are asserted against what the harness finds, so changing one to match
+# an implementation is exactly the move the rule exists to prevent.
+#
+# `pending` is fixture debt a frozen corpus cannot discharge: a property of the
+# recorded data that a reader replaying it has to know about, filed on the
+# group whose data it concerns. It is not a skip list — every vector below
+# still runs. tests/kat.rs prints these in every run, because debt recorded
+# only in a commit message reaches solely whoever already suspects it exists.
+
+[corpus]
+# Nothing reads this key: the asserted total is kat.rs's own constant, typed
+# independently, so the two are a comparison rather than a restatement.
+total_vectors = 5386
+# The C reference the A-E generator linked against. Groups F and CX link no C at
+# all and pin submodule commits and npm versions instead, which do not fit one
+# field -- they are in the `pin` block inside each of those two files.
+reference_pin = "bbbacea"
+# The reference is not in this repository, so this field cannot be checked
+# against a checkout. What holds it is
+# invariants.rs::corpus_reference_pin_matches_the_commit_the_documents_state:
+# AGENT.md and the specification both state the commit, and this must be a
+# prefix of it. A corpus and its documents disagreeing about the corpus's own
+# provenance is the failure that check exists to name.
+
+[[group]]
+id      = "A"
+file    = "group_a_keygen.json"
+name    = "WOTS+ key generation"
+status  = "active"
+vectors = 11
+sources = 4
+
+[[group]]
+id      = "B"
+file    = "group_b_sign.json"
+name    = "WOTS+ signing and public-key recovery"
+status  = "active"
+# B-digit-1..14 are the base-w digit values 1..=14 as whole 2144-byte
+# signatures under the A4 key; B1 (digit 0, the A1 key) and B2 (digit 15, the
+# A4 key) complete the range.
+vectors = 33
+sources = 3
+
+[[group]]
+id      = "C"
+file    = "group_c_addr.json"
+name    = "Address derivation, Base58, CRC-16"
+status  = "active"
+vectors = 29
+# Ten, over twenty-nine vectors: C-addr-from-wots-fill42 reuses
+# addr_from_wots() @ ledger.c:109, which C4-A0..A6 already cite. A vector is
+# not necessarily a source, and the two counts are asserted separately so
+# neither can stand in for the other.
+sources = 10
+
+[[group]]
+id      = "CX"
+file    = "group_c_crosscheck.json"
+name    = "Group C executed TypeScript crosscheck"
+status  = "active"
+vectors = 29
+sources = 8
+# The domain is every vector in group C, classified by the fields it carries,
+# and `not_crosschecked` is EMPTY: every vector in group C is crosschecked
+# against a second implementation. A selector keyed on a transcribed literal
+# would set the size of this project's only independent oracle by how many
+# literals somebody had typed.
+#
+# C4-A1..A7 are the end-to-end secret -> pk -> address path. Six of the seven
+# carry an ALL-ZERO `adrs`, whose byte image is identical under every
+# endianness, so there is no representation decision to get wrong in them.
+# Only C4-A5 carries a non-zero `adrs`; it is crosschecked under the settled
+# little-endian reading of the byte-versus-word `adrs` representation, and its
+# agreement is executed corroboration of that reading rather than an
+# assumption riding on it -- measured, the big-endian image produces a
+# completely different address.
+#
+# Its own group rather than extra fields on group C, for two reasons that are
+# both structural rather than stylistic.
+#
+# First, `file` is singular: a Group names exactly one JSON file, and
+# manifest_and_disk_agree asserts the manifest and the directory match in both
+# directions. A second file under group C's entry is not representable, and a
+# second file listed nowhere fails that test -- correctly.
+#
+# Second, the two files have different oracles and the `oracle` block is
+# file-level. group_c_addr.json is the C. This is the TypeScript, executed.
+# Merging them would force a per-vector exception to a file-level claim, which is
+# the erosion group_f_is_specification_not_crosscheck exists to stop.
+#
+# The id is "CX", not "G". Group ids A-F name subject areas; this names group C's
+# crosscheck, and a fresh letter would read as a seventh subject. It is also not
+# "G" specifically because that collides with unrelated naming already in use.
+
+[[group]]
+id      = "D"
+file    = "group_d_tx.json"
+name    = "Transaction serialization and validation"
+status  = "active"
+# Ds12-N* is the destination-count sweep, signed and validated at twenty-two
+# counts between Ds6's {1, 2, 3, 256}. Every one carries the `wire` key and
+# both offline verdicts, so all twenty-two are in the `validated` census.
+vectors = 72
+sources = 11
+# EVERY VECTOR REPLAYS: the five that need no TXENTRY, the 21 of the
+# transaction core, the 18 that record a verdict or a hash over a byte
+# sequence the generator held privately, and the destination-count sweep.
+#
+# The 18 each carry the sequence they were taken over -- hashed_wire,
+# baseline_wire, mutated_wire, validated_wire, case_wire, wire_one_byte_long --
+# so every replay is load bytes, call the reference, compare. A verdict
+# recorded over bytes the corpus does not carry cannot be handed back to
+# anything. Nothing is built, signed or mutated in Rust, which is the standing
+# constraint: a tx_val__wots verdict is the reference's opinion of a SPECIFIC
+# byte sequence, and a Rust-signed entry would make the harness the thing
+# under test.
+#
+# Those six keys are deliberately not called `wire`. That name is the selector
+# for the signature census, which pairs it with off_wots_signature and
+# signed_len and asserts its own population. Reusing it for identity-signed
+# vectors carrying no verdict would enrol them in that census and turn a green
+# test red about a subject it does not name.
+#
+# THE DISPATCH IS FIVE KEYS AND SIX HANDLERS. `tx_hash` groups eight vectors
+# whose field sets have an EMPTY intersection -- Ds1-N1..N256 carry 8 data
+# fields, Ds3/Ds4/Ds5 carry 3 -- so kat.rs::tx_hash_vector splits on shape
+# exhaustively, with both impossible corners panicking. Dispatching on the
+# source string alone would have put one abstraction over a set that cannot
+# support it.
+#
+# Ds5 was the live instance of that trap and is now faced rather than gated:
+# Ds3/Ds4 carry hash_unchanged, Ds5 carries hash_changed, and Ds5 is the
+# CONTROL proving the other two measure exclusion rather than a hash that
+# ignores everything. kat.rs::tx_hash_mutation matches over both keys and
+# panics on neither-or-both, so the control cannot silently stop controlling.
+#
+# THE SECOND SIDE IS FOUR CENSUSES, not one. Coverage fail-closed over the
+# keys a vector HAS cannot see a key that was never emitted: a has() gate
+# finds it missing and the vector replays green with a validator nothing
+# checked. Each census asserts the population instead, so the count is what
+# fails rather than the absence going unnoticed. group_d_core_census does this
+# for the 21;
+# group_d_signature_negative_census, group_d_tx_hash_census and
+# group_d_cases_census do it for the 18.
+#
+# D5 carries both verdict keys: signed exactly as D4, and validated by the
+# tx_val__wots call D4 has. A signature the reference never validated is a
+# real signature nothing stands behind, which is what the signature census's
+# `reproduced_without_verdict` names; the set is empty and is asserted empty
+# rather than deleted.
+#
+# TWO ITEMS HERE ARE PORT SCOPE, NOT TRANSACTION SCOPE. They are recorded on
+# this group because this is the file whoever reads group D reads.
+#
+# FIRST: the `identity` block is a complete tx_bot_get_wots KAT that nothing
+# runs. It is a TOP-LEVEL object rather than a member of `vectors`, so it has
+# no `id`, Fixture::vectors() never walks it, and no coverage check is offered
+# it. tx_bot_get_wots takes the secret ALONE and produces pk, pub_seed and
+# adrs together: one input, three checkable outputs. What blocks it is that
+# the block has no `id`, and giving it one without an oracle behind the
+# function would produce a vector nothing can answer.
+#
+# SECOND: Ds8b is a signing-ORDER property. The capture set the source
+# address tag half to 20 x 0xa5 and THEN called tx_sign, so the signature is
+# valid for the transaction as written; every other negative in Ds7..Ds11
+# mutates AFTER signing. Ds8b is therefore not a fork case, which is why
+# kat.rs::tx_val_wots_negative keys its arm on the bytes the validator saw
+# rather than on the mutation. The obligation it states for the port: sign the
+# bytes as they stand at the moment of signing. An implementation that
+# normalises or recomputes the source address on its way into the signer
+# disagrees with this vector alone and agrees with every other one, which is
+# the hardest kind of disagreement to attribute after the fact.
+#
+# SIX VECTORS CLOSE THREE SHAPES THE CORPUS HAD NO WIRE IMAGE FOR. All six
+# carry a `source` the group already used, so they dispatch to handlers that
+# already exist rather than arriving with new ones.
+#
+# The measurement that found the three is not the one that replays vectors. It
+# is a FIELD-LEVEL CENSUS over the emitted bytes -- for each field, how many
+# distinct values does the corpus contain, and is any of them distinguishable
+# from the obvious wrong answer. Replay measures the vectors that exist, so
+# replaying all of them is coverage of the corpus and reads like coverage of
+# the subject.
+#
+# D16 / D16-badref -- MDST::ref inside a transaction. Every destination of every
+# one of the 43 images carried an all-zero ref, so a serializer that ignored the
+# field reproduced all of them byte for byte. D10/D11 pin the grammar on a bare
+# 16-byte buffer, which is a different artifact. The NEGATIVE is the unit here,
+# not decoration: without it, D16's VEOK is equally the answer a validator that
+# never read the field would give.
+#
+# D17 -- a change address whose two halves differ, which the group had never
+# had, because addr_from_wots runs every address through addr_from_implicit and
+# that writes the same 20 bytes into both halves. Two properties, and they are
+# DIFFERENT CLAIMS:
+#
+#   * serializer-facing, and the one that matters here: this is the first image
+#     where tag_ptr and hash_ptr select different bytes, so a wrong
+#     ADDR_HASH_OFF flips a recorded boolean. On every existing image both
+#     predicates hold under ANY offset, which is precisely why nothing caught
+#     it. Ds8b closes the same hole for src_addr and not for chg_addr.
+#   * C-facing, and weaker: src_chg_tag_equal and src_chg_hash_equal are the
+#     pair tx_val requires, computed by the REFERENCE'S OWN comparators over the
+#     bytes it laid out. But tx_val was never called -- it needs an open ledger,
+#     and `rule_not_evaluated` says so in the same sentence the three D9 vectors
+#     carry. This is an image two comparators approve of, NOT one a validator
+#     accepted end to end. Do not read it as a valid transaction.
+#
+# The generator's chg_guard is what makes D17's shape a fact rather than a
+# coincidence, and the reason is worth carrying: the harness recomputes those
+# booleans from the wire bytes, so a wrongly-built chg_addr would move the
+# fixture and the harness TOGETHER and eq_bool would compare true == true. A
+# recorded boolean cannot police the shape it records.
+#
+# D18 -- four MUTUALLY DISTINCT asymmetric 64-bit header values. Without them
+# change_total only ever held zero or all-0xff, a palindrome, in D8, the vector
+# whose own note explains why palindromes are insufficient. The adjacent defect
+# found while filling it: D8 gave send_total, fee_total and blk_to_live the SAME
+# value, so a serializer writing those three in the wrong order passes it. And
+# D8 records change_total_bytes with no change_total_value -- a value pinned and
+# never decoded, so even its byte-order claim for those fields is half-tested.
+# D18 records both halves for all four fields.
+#
+# D19-totals / D19-fees -- EMCM_XTXTOTALS and EMCM_XTXFEES. Both totals are
+# COMPUTED FROM THE DESTINATION LIST rather than supplied, which is the specific
+# thing a transaction builder gets wrong, and neither verdict was in the corpus.
+# D19-fees is the sharper one: mdst_val accumulates one MFEE PER DESTINATION,
+# so a builder charging a single fee for a multi-destination transaction is
+# rejected. EMCM_MFEES_OVERFLOW, the third uncovered arm, stays uncovered and
+# that is knowledge rather than debt: MFEE is 500 and the count is bounded at
+# 256, so it is unreachable for any transaction shape and would need an
+# implausible mfee ARGUMENT rather than a transaction.
+#
+# THE SIX DO REUSE THE `wire` KEY, AND THAT IS THE OPPOSITE OF THE DECISION
+# ABOVE RATHER THAN INCONSISTENT WITH IT. The name is avoided for
+# identity-signed entries carrying no verdict, which would enrol in the
+# signature census and grow `reproduced_without_verdict`. These six SHOULD be
+# in that census: every one is signed AND has tx_val__wots run over it, so each
+# lands in `validated`. The rule is not "do not use the key"; it is "know which
+# census the key enrols you in".
+#
+# No `activated` and no `still_deferred`: the loader rejects an active group
+# carrying either, because a partition is only meaningful while something is
+# on the other side of it.
+
+[[group]]
+id      = "E"
+file    = "group_e_net.json"
+name    = "Network constants and packet framing"
+status  = "active"
+vectors = 10
+sources = 3
+
+[[group]]
+id      = "F"
+file    = "group_f_derivation.json"
+name    = "Extension seed derivation (TypeScript)"
+status  = "active"
+# Ninety-six over fifteen sources: the rotation sweep (64 vectors, one
+# source), the account sweep (11, sharing a source), the three BIP39 library
+# captures (6 vectors, three sources) and the fifteen curated vectors the
+# group opened with.
+vectors = 96
+sources = 15
+reason  = """
+src/derive and src/mnemonic replay all ninety-six, through a \
+kat.rs dispatch arm per source over tests/support/derivation_walk.rs -- one \
+walk, shared with the C-free proof in tests/derive.rs. Group F is the only \
+group whose subject is not the vendored C: it captures the seed derivation the \
+published browser extension performs, which exists solely as TypeScript in \
+reference/mochimo-wallet and has no counterpart in reference/mochimo-core. The \
+vectors are executed output, not transcription -- the capture called the \
+TypeScript and reimplements none of it, on fixed seeds with no randomness or \
+clock, and the file's own `pin` block records the three submodule commits and \
+three npm versions it ran against.
+
+A SPECIFICATION CAPTURE, NOT A CROSSCHECK, and the difference is \
+load-bearing. A crosscheck's independence is two implementations of one \
+algorithm agreeing; group F has one implementation and no second opinion, so \
+these vectors carry none of that error-detecting power. A Rust port agreeing \
+with them proves the port matches the extension -- which is the requirement -- \
+and proves nothing about whether the extension is right. No differential \
+exists either: the C's wallet uses a different scheme. The fixture states the \
+class in its own `oracle` block and \
+invariants.rs::group_f_is_specification_not_crosscheck asserts it, so the \
+distinction cannot erode into "we have a second oracle now".
+
+F-ascii-control replays as NOT PORTED (kat.rs NOT_CALLED_IDS): it is the \
+control for F-high-byte-seed's zero call counts, and the ASCII round-trip it \
+records is on a branch nothing live takes. Its fields are read and the \
+dead-path anchor is asserted; no Rust reproduces the round-trip.\
+"""
+# A property of the recorded data that a reader replaying it has to know
+# about. Every vector above still runs; this one carries a value that is not
+# what its name suggests, and the corpus is frozen, so the harness works
+# around it rather than the vector being changed to suit.
+pending = [
+    "F-counter-endianness's `same_convention` was computed over unequal widths (an 8-hex-char string against a 16-hex-char one), so it is false whatever the conventions are; the harness compares the overlapping four bytes instead and does not read the recorded boolean.",
+]
+
+[[group]]
+id      = "RX"
+file    = "group_rx_ripemd.json"
+name    = "RIPEMD-160 outside the reference's reachable domain"
+status  = "active"
+vectors = 26
+sources = 1
+reason  = """
+A third kind of oracle, and the only group in the corpus with NO REFERENCE SIDE AT ALL. The vendored ripemd160_final overflows a one-block stack buffer for every input length with len % 64 >= 56, so for one length in every 64 the C has no answer and cannot be given one: calling it is what crashes. That is not fixture debt, because no number of vectors closes it.
+
+What this group records is @noble/hashes' RIPEMD-160, reached through MochimoHasher, so that RustCrypto's ripemd -- which native::ripemd160 is -- can be checked against something other than itself. Two independent implementations of a PUBLISHED algorithm, neither being the other's specification, which is error detection rather than conformance and is a stronger relationship than group C's. It is emphatically NOT evidence about Mochimo: nothing Mochimo-specific is computed anywhere in the group.
+
+It is deliberately not part of CX. CX's oracle block claims the C computed the values in group_c_addr.json and the TypeScript computed the values beside them; for this class the C computed nothing, so these vectors would make that sentence false of some of CX's members. A group whose stated claim holds for only part of its contents is precisely the erosion group_f_is_specification_not_crosscheck exists to stop.
+
+Twenty-four vectors are the faulting-class lengths in 0..=200 -- residues 56..=63 at three successive block counts, so the overflowing store is exercised as the first block, after one full block, and after several. The remaining two are RIPEMD-160's own published test vectors that land inside the faulting class: the 56-byte overlapping-quadruples string and the 62-byte alphanumeric one. The vendored implementation cannot compute TWO of RIPEMD-160's published test vectors. Measured rather than argued -- inlen 55 returns a digest, inlen 62 exits 134, which is SIGABRT.
+
+A hand-transcribed list of published members filtered through the faulting-class predicate cannot detect a member that was never transcribed in, which is why the whole nine-member suite is carried: every digest is executed, including the seven that never reach this file, and both the suite size and the qualifying count are asserted, so the count is an output of the predicate rather than a premise the list was built to satisfy.
+
+The defect itself is unfixed, which is why this group exists. Its disclosure \
+status is a different fact and is not restated here: a status copied into \
+several sites has to be corrected at each of them when it changes, and one of \
+those copies is always the stale one a reader finds.\
+"""
+
+[[group]]
+id      = "M"
+file    = "group_m_mesh_client.json"
+name    = "Shipped mesh client under a recording fetch double (TypeScript)"
+status  = "active"
+vectors = 6
+sources = 6
+reason  = """
+The shipped wallet's transaction builder -- mochimo-mesh-api-client@1.0.5 -- \
+EXECUTED under a recording fetch double, so that three findings about it are \
+executed behaviour rather than readings of a tarball: the change address \
+leaves the wallet as 20 bytes of hash \
+and neither change field carries the tag; the wallet signs sha256 of whatever \
+unsigned_transaction the server returned -- here a C-emitted prefix for another \
+key, another source and another amount (Ds1_N1_signed_prefix.bin, whose digest \
+the C recorded as Ds1-N1.message_hash) -- and submits the server's combine reply \
+verbatim; and its own 2304-byte builder is built, logged and never sent, with \
+the balance it reports hardcoded to amount + fee. Every recorded boolean is \
+RECOMPUTED by the walk from the sidecar bytes, so a boolean cannot police the \
+shape it records.
+
+A SPECIFICATION CAPTURE, and the opposite of a crosscheck: it records what the \
+shipped client does so that mochimo-crypto's client can be shown NOT to inherit \
+any of it. Agreement between this crate and this group would be a defect. Its \
+oracle block says so and group_f_is_specification_not_crosscheck asserts it. \
+Deterministic at capture time: fixed secrets, canned replies, no clock.\
+"""
+
+[[group]]
+id      = "N"
+file    = "group_n_mesh_live.json"
+name    = "Mesh API live capture (api.mochimo.org)"
+status  = "active"
+vectors = 22
+sources = 12
+reason  = """
+Request/response pairs captured from https://api.mochimo.org at one block by \
+a script depending on nothing in this crate, for the three reads the client \
+makes and the error shapes the middleware returns, plus /construction/parse \
+and /construction/hash over two group D images so the Go reader can be set \
+beside the C. The walk \
+asserts the Rust request body is BYTE-EQUAL to the body sent (whose reply is the \
+one recorded) and that the parsers extract independently derivable values: the \
+tag sent is the address prefix, /call's number equals /account/balance's string \
+at one block, /construction/hash equals the C-recorded id_hash, each error code \
+is the constant the handler's own branch names, read from the vendored \
+handlers.go.
+
+A SPECIFICATION CAPTURE of a recon source: one deployment, one block, its pin \
+block naming both. NOT REPRODUCIBLE byte for byte -- balances and heights \
+move -- so a second capture is a new capture whose diff is read, and never a \
+control that passes. It never touches /construction/submit; its `gaps` block \
+records the one vector it cannot hold, a capture taken at submit time by the \
+process that submits, which is why authorship of a submitted transaction is an \
+open item in the specification rather than a red row on the board.\
+"""
+
+[[group]]
+id      = "AK"
+file    = "group_ak_keygen_bulk.json"
+name    = "WOTS+ key generation, bulk (digests)"
+status  = "active"
+vectors = 1512
+sources = 5
+reason  = """
+A differential run can execute thousands of cases per function against the \
+linked C and record none of them. This file records a thousand wots_pkgen \
+keys (each as the sha256 \
+of its 2144-byte public key AND the 40-byte v3 address addr_from_wots derives \
+from it), 128 expand_seed digests, and 128 each of prf, thash_f and gen_chain \
+whole -- their outputs are 32 bytes. Inputs are constructed by the reference's \
+own sha256 over a label and a counter, the crc16_base58_corpus idiom, and every \
+input is recorded in its vector; the loader reads the fields and never applies \
+the schedule. `artifacts = "digest"` in the header is asserted by \
+kat.rs::artifact_policy_is_declared_by_the_generator_and_enforced_here: no \
+vector here may carry a sidecar. Group A keeps the whole-artifact keys.\
+"""
+
+[[group]]
+id      = "BK"
+file    = "group_bk_sign_bulk.json"
+name    = "WOTS+ signing and recovery, bulk (digests)"
+status  = "active"
+vectors = 1128
+sources = 2
+reason  = """
+A thousand (msg, secret, pub_seed, adrs) tuples, \
+each with the signature and the keygen public key recorded as sha256 digests, \
+the reference's own verdict that recovery from the signature reproduces the \
+key, and the same verdict over the signature with one bit flipped at a \
+position the vector records -- the positive and the negative of group B's B1-B8 \
+at a thousand points, with the flipped byte sweeping the whole 2144-byte \
+signature. Plus 128 chain_lengths vectors, whole. Digest group, as AK.\
+"""
+
+[[group]]
+id      = "HS"
+file    = "group_hs_hash_sweep.json"
+name    = "Hash primitives at every input length across two block boundaries"
+status  = "active"
+vectors = 390
+sources = 3
+reason  = """
+sha256 at every length 0..=129, sha3-512 at every \
+length 0..=145 (rate 72), and ripemd160 at every length 0..=129 OUTSIDE the \
+class the vendored implementation cannot compute (len % 64 >= 56), \
+which the file lists in `ripemd160_omitted`. Every hash input is built from \
+distinct 32-byte chunks so no two blocks of one input are equal. Group RX \
+carries @noble/hashes' answers for the omitted class, and \
+kat.rs::hash_sweep_and_rx_partition_the_ripemd160_lengths asserts the two \
+files partition 0..=129 exactly. Whole-artifact group: every output is inline.\
+"""
+
+[[group]]
+id      = "AKX"
+file    = "group_akx_keygen_bulk_crosscheck.json"
+name    = "Group AK executed TypeScript crosscheck (bulk key generation)"
+status  = "active"
+vectors = 1000
+sources = 1
+reason  = """
+The thousand AK keygen vectors, recomputed by the \
+TypeScript in reference/mochimo-wots -- WOTS.wots_pkgen, then \
+WotsAddress.addrFromWots and MochimoHasher.hashWith("sha256") over the same \
+2144-byte key -- from the same recorded inputs. An EXECUTED CROSSCHECK in CX's \
+sense: two implementations sharing no code, and they can disagree. Five hundred \
+of the thousand carry a non-zero adrs, so the little-endian `adrs` reading is \
+corroborated five hundred times rather than once (C4-A5). The loader compares \
+the TypeScript's recorded values against the C's (read from AK) and against \
+this crate's, every leg on its own. Its own oracle block says so and \
+invariants.rs::group_c_crosscheck_is_an_executed_oracle checks the file.\
+"""
+
+[[group]]
+id      = "CK"
+file    = "group_ck_tag_crosscheck.json"
+name    = "Group C crc16_base58_corpus executed TypeScript crosscheck"
+status  = "active"
+vectors = 1000
+sources = 1
+reason  = """
+The thousand (tag, crc16, base58) triples group C carries, each recomputed by \
+TagUtils.addrTagToBase58 in reference/mochimo-wots with the CRC16 read back \
+out of its own output, as CX does for its four tag vectors -- so the corpus is \
+crosschecked at a thousand and four tags rather than at four. Executed \
+crosscheck, as AKX; the loader compares each entry three ways.\
+"""
+
+[[group]]
+id      = "V"
+file    = "group_v_pos_tx.json"
+name    = "Proof-of-stake validator transactions, the node's tx_read and tx_hash"
+status  = "active"
+vectors = 3
+sources = 1
+reason  = """
+The three transactions a validator's cold key signs on the proof-of-stake \
+chain -- set-delegate, clear-delegate, claim -- built from synthetic public \
+WOTS+ components and signed by the proof-of-stake node's own wots_sign over its \
+own tx_hash, with tx_read's offsets and verdicts on four negative images each. \
+Printed by wallet_tx_vectors.c, linked against the node at the commit the \
+file's reference_commit names, which is not the reference_pin above: this \
+group's oracle is a different C tree. The file carries its source once, at \
+the top level, and not per vector; the loader reads it from there. One recorded \
+verdict is not this crate's: tx_read accepts options[2] = 1 on these types and \
+this codec refuses it, which the replay asserts as a declared difference.\
+"""
+
+[[group]]
+id      = "S"
+file    = "group_s_stake_tx.json"
+name    = "v4.1 staking, consent and dust-proof cold-key transactions, from stake-tx.mjs"
+status  = "active"
+vectors = 19
+sources = 1
+reason  = """
+Sixteen v4.1 transactions -- stakes, unstakes, dust-proof claims (one of \
+2^64 - 1), dust-proof set- and clear-delegate, an ACCEPT of each consent \
+kind and two revokes, on testnet (7357) and mainnet (0xACA1) -- and three \
+consent digests computed from terms alone. Printed by running stake-tx.mjs, \
+the v4.1 reference client in mochimo-pos-tx-tools at the commit the file's \
+reference_commit names, unmodified, over a throwaway SDK master seed (the \
+bytes 0x00..0x1f) that the file records; nothing in this repository re-runs \
+it. The replay rebuilds every image from the inputs the generator was given \
+-- the seed, the account, the spend index, the network and the command line \
+-- through this crate's own payload types, SDK derivation and signer, and \
+compares it byte for byte. The digests a87224e5... (testnet) and 4b20b2f4... \
+(mainnet) for the same election terms are also the proof-of-stake node's own \
+native test vectors. stake-tx.mjs is the oracle, not the node: no vector \
+here is a transaction a node accepted.\
+"""

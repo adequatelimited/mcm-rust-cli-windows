@@ -1,0 +1,101 @@
+# Licence and advisory policy for this workspace.
+#
+#   cargo deny check
+#
+# Needs network access for the advisory database. It catches policy
+# violations introduced by a dependency change; new advisories against
+# unchanged dependencies are reported only when the check is run again.
+# The rules mirror the dependency comments in
+# `crates/mochimo-crypto/Cargo.toml`.
+
+[graph]
+# The release binary is built with `--features mesh-https`, which pulls in
+# rustls, ring and webpki-roots. Checking all features covers them.
+all-features = true
+
+# `targets` is unset so every target triple in the lockfile is checked.
+
+# `crates/mochimo-crypto/ui/downstream` is a separate test workspace whose
+# only dependency is this crate by path, so it adds no third-party crates.
+
+[advisories]
+# No ignored advisories.
+ignore = []
+# Report unmaintained crates anywhere in the graph, including transitive ones.
+unmaintained = "all"
+# Deny rather than warn: `cargo deny check` exits 0 on warnings.
+yanked = "deny"
+
+[licenses]
+# Each identifier is required by at least one crate in the graph;
+# cargo-deny reports unused entries.
+allow = [
+    # Most of the graph, including the RustCrypto crates.
+    "MIT",
+    "Apache-2.0",
+    # `ring` (`Apache-2.0 AND ISC`), `rustls-webpki` and `untrusted`, under
+    # `mesh-https`.
+    "ISC",
+    # `subtle`, used for constant-time comparison of key material.
+    "BSD-3-Clause",
+    # `unicode-ident` (`(MIT OR Apache-2.0) AND Unicode-3.0`), via
+    # `proc-macro2`, `syn` and `quote`.
+    "Unicode-3.0",
+    # `webpki-roots`, Mozilla's root certificate store (a data licence),
+    # under `mesh-https`.
+    "CDLA-Permissive-2.0",
+]
+
+# `Apache-2.0 WITH LLVM-exception` is not needed: `wasi` is also offered
+# under MIT.
+
+[licenses.private]
+# This workspace's own crates use the licence in the root `LICENSE.md`,
+# declared as `license-file` because it has no SPDX identifier. They are
+# `publish = false`, so cargo-deny skips them instead of reporting them as
+# unlicensed.
+ignore = true
+
+[bans]
+# Duplicate versions are allowed: the current duplicates (`syn`, `toml`,
+# `winnow`, `serde_spanned`, `toml_datetime`, `windows-sys`) come only from
+# dev-dependencies (`trybuild`, `toml`) and are not in a wallet build. The
+# duplicate that matters is denied by name below.
+multiple-versions = "allow"
+# Every dependency must have an explicit version requirement.
+wildcards = "deny"
+
+# The hash crates (`sha2`, `sha3`, `ripemd`, `pbkdf2`, `hmac`, `blake2`) use
+# `digest` 0.10. A crate on `digest` 0.11 would link a second, incompatible
+# `Digest` trait.
+[[bans.deny]]
+crate = "digest:>=0.11"
+reason = "the hash crates are pinned to the digest 0.10 line; see the sha3 comment in crates/mochimo-crypto/Cargo.toml"
+
+# HTTP transport: no decompression of untrusted input (`gzip`, `brotli`), no
+# `json` (the codec parses by hand), no cookies or proxies, and TLS only
+# through rustls (`mesh-https`), not `native-tls`.
+[[bans.features]]
+crate = "ureq"
+deny = ["gzip", "brotli", "json", "cookies", "socks-proxy", "win-system-proxy", "native-tls"]
+
+# `alloc` pulls in `password-hash` and PHC-string support this crate does not
+# use. Without it the KDF takes its working memory from the caller, which
+# keeps it in a zeroizing buffer.
+[[bans.features]]
+crate = "argon2"
+deny = ["alloc", "std", "password-hash"]
+
+# `preserve_order` would change request key order on the wire. The test
+# `mesh::request_bodies_serialise_with_sorted_keys` checks the bytes; this
+# entry reports the cause earlier.
+[[bans.features]]
+crate = "serde_json"
+deny = ["preserve_order"]
+
+[sources]
+# Only crates.io releases pinned by `Cargo.lock`; git sources are refused.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

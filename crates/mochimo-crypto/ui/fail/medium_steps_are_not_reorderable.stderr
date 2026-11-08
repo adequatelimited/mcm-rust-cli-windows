@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> ui/fail/medium_steps_are_not_reorderable.rs:17:22
+   |
+17 |     let _ = m.rename(written, dir);
+   |               ------ ^^^^^^^ expected `Synced`, found `Written`
+   |               |
+   |               arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/keystore/medium.rs
+   |
+   |     fn rename(&mut self, synced: Synced, dir: &Directory) -> Result<Renamed>;
+   |        ^^^^^^

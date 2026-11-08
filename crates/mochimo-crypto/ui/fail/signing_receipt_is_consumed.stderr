@@ -1,0 +1,9 @@
+error[E0382]: use of moved value: `r`
+  --> ui/fail/signing_receipt_is_consumed.rs:28:48
+   |
+26 |     let r = ks.persist_advance(&tag, &[0xD1u8; 32], mochimo_crypto::keystore::Figures { reserved_balance: 5_000_000, blk_to_live: 0 ...
+   |         - move occurs because `r` has type `AdvanceReceipt`, which does not implement the `Copy` trait
+27 |     let _first = ks.sign_spend(&[0xD1u8; 32], r, KeyAccess::Master(&master));
+   |                                               - value moved here
+28 |     let _second = ks.sign_spend(&[0xD1u8; 32], r, KeyAccess::Master(&master));
+   |                                                ^ value used here after move

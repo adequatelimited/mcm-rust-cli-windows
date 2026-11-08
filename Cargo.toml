@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/mochimo-crypto"]
+
+[workspace.package]
+edition = "2021"
+# 1.89 for `std::fs::File::try_lock`. The keystore holds `keystore.lock` with
+# flock(2), which the kernel releases on any process death, so a held lock
+# always means a live holder.
+rust-version = "1.89"
+# The Mochimo Cryptocurrency Engine License Agreement, version 1.0. The text is
+# the root `LICENSE.md`; the crate inherits this declaration.
+license-file = "LICENSE.md"
+
+# Profiles are only read from the workspace root.
+[profile.release]
+# Must stay "unwind": every scrub of key material runs in `Drop` (`zeroize`,
+# `Zeroizing` buffers, `Secret`). Under "abort" destructors do not run, so a
+# panic leaves secrets in memory, and SIGABRT may write them to a core file.
+panic = "unwind"
+# Release builds disable overflow checks by default; enable them so a bare
+# arithmetic operator panics instead of wrapping. Explicit `wrapping_*` calls
+# are unaffected.
+overflow-checks = true

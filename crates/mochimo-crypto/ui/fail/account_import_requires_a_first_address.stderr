@@ -1,0 +1,37 @@
+error[E0599]: no associated function or constant named `import_with_unverified_tag` found for struct `Account` in the current scope
+  --> ui/fail/account_import_requires_a_first_address.rs:19:47
+   |
+19 |     let _ = mochimo_crypto::account::Account::import_with_unverified_tag(todo!(), todo!());
+   |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `Account`
+   |
+note: if you're trying to build a new `Account` consider using one of the following associated functions:
+      Account::import_sdk
+      Account::import
+      Account::derive
+      Account::restore_from_record
+  --> src/account.rs
+   |
+   |       pub fn import_sdk(account_seed: Secret<SEED_LEN>) -> Account {
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | /     pub fn import(
+   | |         root: Secret<SEED_LEN>,
+   | |         first_address: &[u8; crate::consts::WOTS_ADDR_LEN],
+   | |     ) -> Result<Account> {
+   | |________________________^
+...
+   |       pub fn derive(master: &Secret<SEED_LEN>, account_index: u32) -> Account {
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   |       pub fn restore_from_record(record: AccountRecord) -> Result<Account> {
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable expression
+  --> ui/fail/account_import_requires_a_first_address.rs:19:83
+   |
+19 |     let _ = mochimo_crypto::account::Account::import_with_unverified_tag(todo!(), todo!());
+   |                                                                          -------  ^^^^^^^ unreachable expression
+   |                                                                          |
+   |                                                                          any code following this expression is unreachable
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default

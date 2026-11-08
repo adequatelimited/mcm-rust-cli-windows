@@ -1,0 +1,24 @@
+# A DEPENDENT of mochimo-crypto, built with the crate's DEFAULT features --
+# the wallet's build -- by `tests/signing.rs::raw_signer_is_unreachable_from_a_default_features_dependent`.
+# Its own workspace, so the root workspace does not
+# build it, and outside `tests/` so the source-scanning checks do not ingest
+# it. `pass` must compile; `fail` must not, with exactly the two E0603 errors
+# the test pins. `Cargo.lock` is copied in from the workspace at test time.
+[package]
+name = "mochimo-downstream-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+mochimo-crypto = { path = "../.." }
+
+[[bin]]
+name = "pass"
+path = "src/pass.rs"
+
+[[bin]]
+name = "fail"
+path = "src/fail.rs"

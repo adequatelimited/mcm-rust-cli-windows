@@ -1,0 +1,70 @@
+# Build, lint, test and document the workspace.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: check, ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Clone the commit
+        run: |
+          base=$HOME
+          git clone --quiet --no-checkout "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$base/src"
+          git -C "$base/src" fetch --quiet origin "$GITHUB_SHA"
+          git -C "$base/src" checkout --quiet --detach "$GITHUB_SHA"
+          echo "SRC=$base/src" >> "$GITHUB_ENV"
+
+      - name: Toolchain
+        id: toolchain
+        run: |
+          cd "$SRC"
+          rustup toolchain install --no-self-update
+          echo "commit $(git rev-parse HEAD)"
+          rustc -vV
+
+      - name: cargo build
+        run: cd "$SRC" && cargo build --workspace --all-targets --locked
+
+      - name: cargo clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cd "$SRC" && cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cd "$SRC" && cargo test --workspace --locked
+
+      - name: cargo doc
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cd "$SRC" && cargo doc --workspace --no-deps --locked
+
+      - name: cargo deny
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
+          cd "$SRC"
+          cargo install --quiet --locked cargo-deny --version 0.20.2
+          cargo deny --locked check

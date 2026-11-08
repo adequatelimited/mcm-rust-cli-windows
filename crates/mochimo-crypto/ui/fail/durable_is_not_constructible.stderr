@@ -1,0 +1,16 @@
+error[E0603]: tuple struct constructor `Durable` is private
+  --> ui/fail/durable_is_not_constructible.rs:11:39
+   |
+11 |     let _ = mochimo_crypto::keystore::Durable(());
+   |                                       ^^^^^^^ private tuple struct constructor
+   |
+  ::: src/keystore/mod.rs
+   |
+   | pub struct Durable(());
+   |                    -- a constructor is private if any of the fields is private
+   |
+note: the tuple struct constructor `Durable` is defined here
+  --> src/keystore/mod.rs
+   |
+   | pub struct Durable(());
+   | ^^^^^^^^^^^^^^^^^^

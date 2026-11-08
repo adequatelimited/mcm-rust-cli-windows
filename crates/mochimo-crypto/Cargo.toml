@@ -1,0 +1,164 @@
+[package]
+name = "mochimo-crypto"
+authors = ["Adequate Systems HK Limited"]
+version = "2.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+description = "Safe Rust API over the Mochimo cryptographic primitives."
+publish = false
+
+[features]
+# The only backend. The native code is checked against the corpus under
+# `fixtures/`.
+default = ["native"]
+
+# The Rust WOTS+ core, the address path and the wallet built on them.
+#
+# Protocol constants in `lib.rs::consts` are checked against the reference
+# corpus by `kat.rs` (`constants_match_the_reference`,
+# `group_e_constants_match_the_reference`).
+#
+# The three diagnostic-string functions panic, and there is no transaction
+# validator: group D records a node's verdicts. The transaction accessors and
+# the construction path (`tx::wire`) are implemented.
+native = ["dep:sha2", "dep:sha3", "dep:ripemd", "dep:pbkdf2", "dep:serde_json", "dep:argon2", "dep:chacha20poly1305", "dep:rustix", "dep:hmac", "dep:aes", "dep:aes-gcm", "dep:cbc", "dep:base64"]
+
+# Exposes `backend::{native, selected}`, including the raw WOTS+ signer, to
+# the test tree. Never in `default` or a wallet build: with it off, `backend`
+# is `pub(crate)` and the only path to a signature is `Keystore::sign_spend`
+# behind an `AdvanceReceipt` (I1). Enabled for tests through the
+# dev-dependency on this crate below. `invariants.rs` checks that `default`
+# does not name this feature.
+raw-backend = []
+
+# The Mesh API transport (`mesh::http::UreqTransport`) without TLS, so tests
+# can exercise it over a loopback `TcpListener` with no C in the test or Miri
+# build graphs. The codec, spend builder and parsers are under `native`.
+mesh-http = ["native", "dep:ureq"]
+# TLS for the transport: rustls with `ring` and the bundled webpki roots.
+# Separate from `mesh-http` because `ring` compiles C and assembly; this is
+# the only feature that needs a C toolchain, and it is kept out of every test
+# target and Miri.
+#
+# Root store: `webpki-roots` (Mozilla's store compiled in). It keeps X.509
+# parsing in safe Rust (`rustls-webpki`) instead of platform verifiers, and
+# gives the same trust anchors on every platform. Cost: the roots are fixed
+# at build time, so a distrusted CA stays trusted until a rebuild, and
+# revocation is not checked. TLS authenticates the chosen node; it does not
+# make the node's answers true, which is why `--node` has no default.
+# `rustls-native-certs` is the alternative for long-lived installs.
+mesh-https = ["mesh-http", "ureq/rustls"]
+
+[dependencies]
+zeroize = { version = "1", features = ["zeroize_derive"] }
+# Constant-time comparison of key material (`Secret::ct_eq`), used to reject
+# importing a root that is already stored. Secrets are never compared with `==`.
+subtle = { version = "2", default-features = false }
+# SHA-256, the WOTS+ `core_hash` (reference wots.c).
+sha2 = { version = "0.10", default-features = false, optional = true }
+# The address hash `ripemd160(sha3_512(x))` (reference ledger.c).
+#
+# `Sha3_512` (FIPS-202 padding byte 0x06), not `Keccak512` (0x07), matching the
+# reference `sha3_final`. The reference output is FIPS-202 only on a
+# little-endian host; this crate is little-endian-normalized
+# (see `backend::native::put16`).
+#
+# Kept on the 0.10/0.1 line so they share `digest` 0.10 with `sha2`.
+sha3 = { version = "0.10", default-features = false, optional = true }
+ripemd = { version = "0.1", default-features = false, optional = true }
+# BIP-39 `mnemonicToSeed`: PBKDF2-HMAC-SHA512, 2048 rounds, 64 bytes. The
+# Mochimo browser extension keeps the first 32 bytes as the master seed.
+# Used only by `src/mnemonic`. The group F vectors check agreement with the
+# extension's BIP-39 library.
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"], optional = true }
+# JSON for the Mesh API, used only by `mesh::codec` as `serde_json::Value`
+# parsed by hand; no `serde` derive, so every response field is checked for
+# presence, type, width and range before use. Requests are built with `json!`
+# and rely on sorted key order, so `preserve_order` must not be enabled
+# (checked by `mesh::request_bodies_serialise_with_sorted_keys`).
+serde_json = { version = "1", default-features = false, features = ["std"], optional = true }
+# Blocking HTTP client for the Mesh transport: connect and global timeouts,
+# redirects disabled, and a response-body limit enforced before buffering.
+# All default features off (no gzip, json, cookies or proxies). TLS is behind
+# `mesh-https`. The transport never carries key material.
+ureq = { version = "3", default-features = false, optional = true }
+# Encryption at rest.
+#
+# Argon2id (RFC 9106) derives the store key from the password: memory-hard,
+# unlike PBKDF2, which stays only for BIP-39. `alloc` is off, so the caller
+# supplies the block buffer (`hash_password_into_with_memory`), which lives in
+# a `Zeroizing<Vec<Block>>` and is cleared on drop.
+argon2 = { version = "0.5", default-features = false, features = ["zeroize"], optional = true }
+# ChaCha20-Poly1305: constant-time on every target, unlike table-driven
+# software AES. Pure Rust, so the plaintext image never passes through C.
+# Nonce handling is in `keystore::crypt::nonce_for`.
+chacha20poly1305 = { version = "0.10", default-features = false, optional = true }
+# Used only by `extension_export` to decrypt the Mochimo browser extension's
+# export file for import; nothing this crate writes uses them.
+#
+# * `hmac`: the extension's storage key is two HMAC-SHA256s over the master
+#   seed.
+# * `aes`, `aes-gcm`, `cbc`: the master seed is AES-256-GCM with a 16-byte IV,
+#   each account record AES-256-CBC with PKCS#7 padding, both under
+#   PBKDF2-SHA256 keys.
+# * `base64`: every field of the export is standard base64.
+hmac = { version = "0.12", default-features = false, optional = true }
+aes = { version = "0.8", default-features = false, optional = true }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"], optional = true }
+cbc = { version = "0.1", default-features = false, features = ["alloc", "block-padding"], optional = true }
+base64 = { version = "0.22", default-features = false, features = ["alloc"], optional = true }
+
+# The command-line wallet. Requires `mesh-https` (rustls and `ring`), so no
+# test target links it. The command layer is tested in `tests/cli.rs`
+# against a fake transport; that file's pty harness also builds this binary
+# in a subprocess (`cargo build --features mesh-https --bin tawara`) and
+# drives it under a pseudo-terminal to cover argv, the tty password prompt
+# and `UreqTransport`.
+[[bin]]
+name = "tawara"
+required-features = ["mesh-https"]
+
+# Read-only TLS probe of a Mesh endpoint (three reads, no submit). Run by hand.
+[[example]]
+name = "mesh_probe"
+required-features = ["mesh-https"]
+
+[dev-dependencies]
+# This crate as its own dev-dependency, enabling `raw-backend` and
+# `mesh-http` for test targets only. `default-features = false` keeps the test
+# feature set exactly as written; `invariants.rs` checks this line. Not
+# `mesh-https`, which would bring `ring`'s C into the test and Miri graphs.
+mochimo-crypto = { path = ".", default-features = false, features = ["raw-backend", "mesh-http"] }
+serde_json = "1"
+toml = "0.8"
+# Compile-fail tests (`tests/compile_fail.rs`) for properties of the form
+# "this must not compile": the raw signer is unnameable, the receipt is
+# consumed, `Secret` has no comparison, the commit steps cannot be reordered.
+#
+# The .stderr files pin rustc's exact wording, so a toolchain change can fail
+# them without any change to the property. Regenerate with
+# `TRYBUILD=overwrite cargo test --test compile_fail` and review the diff.
+trybuild = "1.0.116"
+# Parser for the source scans in `tests/invariants.rs` (I1 route, Debug
+# holders, `Durable` construction count, `Secret` comparisons). A real parser
+# handles multi-line signatures that a line-based scan missed.
+#
+# Test-only; `invariants.rs::syn_is_confined_to_the_test_targets` checks that
+# it stays out of the library's direct dependencies (`syn` is already in the
+# normal closure through zeroize_derive).
+#
+# `quote` renders offending types in failure messages; `visit` lets the
+# zeroization scan walk every expression in a function body.
+syn = { version = "2", features = ["full", "parsing", "printing", "visit"] }
+quote = "1"
+# Token-level scans: macro bodies are not parseable as items, so
+# `no_test_in_the_suite_is_ignored` counts their attributes over tokens.
+# `span-locations` lets token scans such as
+# `no_native_endian_conversions_anywhere_in_the_crate` report line numbers.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+# Directory-relative file operations keep the lock and committed state on
+# one directory identity. Safe wrappers avoid handwritten syscall bindings.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"], optional = true }

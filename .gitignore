@@ -1,0 +1,10 @@
+# Rust
+/target/
+
+# macOS Finder metadata
+.DS_Store
+
+# Downstream probe: lock file copied by tests/signing.rs, and its build
+# directory.
+crates/mochimo-crypto/ui/downstream/Cargo.lock
+/crates/mochimo-crypto/ui/downstream/target/

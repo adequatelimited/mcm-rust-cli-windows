@@ -1,0 +1,109 @@
+{
+  "group": "M",
+  "name": "Shipped mesh client under a recording fetch double (TypeScript)",
+  "generator": "reference/gen-fixtures/ts/group_m_mesh_client.ts",
+  "rule": "Every value is what the vendored mochimo-mesh-api-client did under a recording fetch double whose replies are made of C-recorded bytes. Nothing is reimplemented and nothing is edited. Regenerate rather than edit.",
+  "oracle": {
+    "class": "specification-capture",
+    "is_independent_oracle": false,
+    "second_implementation_exists": false,
+    "why": "One implementation -- the shipped client -- executed and recorded. There is no second implementation of its behaviour and no reference for it: the point of the capture is the opposite of a crosscheck. It records what the shipped wallet does (signs a server's bytes, sends a 20-byte change hash, builds locally and discards it) so that this crate's client can be shown, against these same bytes, not to inherit any of it (errata 149, 158). Agreement between mochimo-crypto and this file would be a defect, not evidence.",
+    "errata": 158
+  },
+  "double": {
+    "payloads_unsigned_transaction": "hex(fixtures/Ds1_N1_signed_prefix.bin), the C-emitted signed prefix of Ds1-N1",
+    "combine_signed_transaction": "hex(fixtures/D1v_tx.bin), the C-emitted minimal valid image",
+    "change_pk_substituted": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "source_balance_substituted": "999",
+    "every_reply": "HTTP 200 with content-type application/json; no endpoint outside the five construction ones is served"
+  },
+  "pin": {
+    "mesh_api_client_commit": "6aba0f3720ef5c1229a85ffb7fa024a8a6b7fdeb",
+    "mesh_api_client_version": "1.0.5",
+    "mochimo_wots_commit": "b583580bffcbe51dbcfd4e30aa711d0d2703b851",
+    "mochiwallet_commit": "af20bfccdde1b0dd75ac1a98f7c83b82ccf359a2",
+    "mochimo_wots_version": "1.2.8",
+    "crypto_js_version": "4.2.0",
+    "node_version": "v26.8.1"
+  },
+  "vectors": [
+    {
+      "id": "M-requests",
+      "source": "MochimoApiClient.makeRequest() @ reference/mochimo-mesh-api-client/src/api.ts:111",
+      "note": "every request the shipped path made, in order, as JSON lines: seq, url, method, content_type, body. Five POSTs to the construction endpoints; the balance endpoint is never called on this path (the wallet fetches a balance one layer up and never hands it to the builder).",
+      "requests_file": "M-requests.bin",
+      "requests_len": 22001,
+      "request_count": 5,
+      "endpoints_called": "/construction/preprocess,/construction/metadata,/construction/payloads,/construction/combine,/construction/submit",
+      "balance_endpoint_called": false
+    },
+    {
+      "id": "M-change-address-is-a-20-byte-hash",
+      "source": "TransactionBuilder.buildAndSignTransaction() @ reference/mochimo-mesh-api-client/src/transaction.ts:214",
+      "note": "F1. What leaves the wallet for the change key is changeWallet.getAddrHash(): 20 bytes, sent as both change_pk and change_addr, and neither field carries the tag. The full 40-byte change address appears in no request body. The change tag is the source tag -- both wallets are built under the one v3 account tag, as the shipped selector builds them -- and it reaches the server only as the SOURCE_TRANSFER account; the change address's tag half is the server's doing (constructionPayloadsHandler copies it from the source).",
+      "change_wallet_tag": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "change_wallet_addr_hash": "c67ed829a5086dfd29fa378ed9990ee4656294ef",
+      "change_wallet_address": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5ac67ed829a5086dfd29fa378ed9990ee4656294ef",
+      "preprocess_change_pk_sent": "0xc67ed829a5086dfd29fa378ed9990ee4656294ef",
+      "preprocess_change_addr_sent": "0xc67ed829a5086dfd29fa378ed9990ee4656294ef",
+      "change_tag_equals_source_tag": true,
+      "change_pk_carries_change_tag": false,
+      "change_addr_carries_change_tag": false,
+      "change_full_address_in_any_request_body": false
+    },
+    {
+      "id": "M-signed-digest-is-the-servers",
+      "source": "sourceWallet.sign(MochimoHasher.hash(unsigned_transaction)) @ reference/mochimo-mesh-api-client/src/transaction.ts:241",
+      "note": "F2. The digest the wallet signed is sha256 of the served unsigned_transaction -- here a C-emitted prefix for another key, another source and another amount (Ds1_N1_signed_prefix.bin, whose sha256 the C recorded as Ds1-N1.message_hash) -- not of anything the wallet built and not the payloads[0].hex_bytes the server offered. The signature recovers to the source public key, so it is a real WOTS+ signature over a transaction the wallet never saw.",
+      "served_unsigned_file": "M-served_unsigned.bin",
+      "served_unsigned_len": 160,
+      "served_unsigned_origin_file": "Ds1_N1_signed_prefix.bin",
+      "served_payload_hex_bytes": "0000000000000000000000000000000000000000000000000000000000000000",
+      "signed_digest": "7f905421ad31e28ce5634ca34900dcb62df625573c593e88f12ef966eb8f8dfa",
+      "signature_file": "M-signature.bin",
+      "signature_len": 2144,
+      "source_public_key_file": "M-source_pk.bin",
+      "source_public_key_len": 2144,
+      "source_pub_seed": "083fe37a094d40264ad37cfe8d32701e6db26886bfe7f9bb27ae9dfc58de048c",
+      "source_adrs": "b1e0276f8337d08838a047f0ddc59da0f04a0e95420000000e00000001000000",
+      "source_address": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a68d0a1bc1fa78543c0f52fe1c6c267e3228b529a",
+      "requested_amount": "1000000",
+      "requested_fee": "500",
+      "requested_destination_tag": "0x6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b"
+    },
+    {
+      "id": "M-local-bytes-never-leave",
+      "source": "TransactionBuilder.createTransactionBytes() @ reference/mochimo-mesh-api-client/src/transaction.ts:28",
+      "note": "F3. The client builds a 2304-byte transaction of its own, logs it, and sends none of it: the bytes appear in no request body. The source_balance it reports to the server is the hardcoded amount + fee, not a balance anybody fetched.",
+      "local_tx_bytes_file": "M-local_tx.bin",
+      "local_tx_bytes_len": 2304,
+      "local_bytes_in_any_request_body": false,
+      "source_balance_sent": "1000500",
+      "requested_amount_plus_fee": "1000500"
+    },
+    {
+      "id": "M-server-options-forwarded",
+      "source": "TransactionBuilder.buildTransaction() @ reference/mochimo-mesh-api-client/src/transaction.ts:70",
+      "note": "The server's preprocess options are forwarded to metadata and its metadata to payloads unread: the change_pk the server substituted travels through both, and the wallet's own change hash is in neither.",
+      "served_change_pk": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "served_source_balance": "999",
+      "metadata_request_change_pk": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "payloads_request_change_pk": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "payloads_request_source_balance": "999"
+    },
+    {
+      "id": "M-combine-reply-forwarded-verbatim",
+      "source": "TransactionBuilder.submitSignedTransaction() @ reference/mochimo-mesh-api-client/src/transaction.ts:157",
+      "note": "F2, second seam. What the wallet submits is the server's combine reply, byte for byte -- here D1v_tx.bin, a reference image carrying the identity key's signature -- and the signature the wallet just made is not in it. The server chooses the submitted bytes twice.",
+      "combine_reply_file": "M-combine_reply.bin",
+      "combine_reply_len": 2408,
+      "combine_reply_origin_file": "D1v_tx.bin",
+      "submitted_file": "M-submitted.bin",
+      "submitted_len": 2408,
+      "submitted_equals_combine_reply": true,
+      "wallet_signature_in_submitted_bytes": false,
+      "served_submit_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "submit_result_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}
